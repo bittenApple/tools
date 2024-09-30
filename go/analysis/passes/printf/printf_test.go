@@ -14,5 +14,8 @@ import (
 func Test(t *testing.T) {
 	testdata := analysistest.TestData()
 	printf.Analyzer.Flags.Set("funcs", "Warn,Warnf")
-	analysistest.Run(t, testdata, printf.Analyzer, "a", "b", "nofmt")
+
+	analysistest.Run(t, testdata, printf.Analyzer,
+		"a", "b", "nofmt", "typeparams", "issue68744")
+	analysistest.RunWithSuggestedFixes(t, testdata, printf.Analyzer, "fix")
 }

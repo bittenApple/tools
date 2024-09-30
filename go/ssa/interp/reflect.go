@@ -119,7 +119,7 @@ func ext۰reflect۰rtype۰NumField(fr *frame, args []value) value {
 
 func ext۰reflect۰rtype۰NumIn(fr *frame, args []value) value {
 	// Signature: func (t reflect.rtype) int
-	return args[0].(rtype).t.(*types.Signature).Params().Len()
+	return args[0].(rtype).t.Underlying().(*types.Signature).Params().Len()
 }
 
 func ext۰reflect۰rtype۰NumMethod(fr *frame, args []value) value {
@@ -129,13 +129,13 @@ func ext۰reflect۰rtype۰NumMethod(fr *frame, args []value) value {
 
 func ext۰reflect۰rtype۰NumOut(fr *frame, args []value) value {
 	// Signature: func (t reflect.rtype) int
-	return args[0].(rtype).t.(*types.Signature).Results().Len()
+	return args[0].(rtype).t.Underlying().(*types.Signature).Results().Len()
 }
 
 func ext۰reflect۰rtype۰Out(fr *frame, args []value) value {
 	// Signature: func (t reflect.rtype, i int) int
 	i := args[1].(int)
-	return makeReflectType(rtype{args[0].(rtype).t.(*types.Signature).Results().At(i).Type()})
+	return makeReflectType(rtype{args[0].(rtype).t.Underlying().(*types.Signature).Results().At(i).Type()})
 }
 
 func ext۰reflect۰rtype۰Size(fr *frame, args []value) value {
@@ -179,7 +179,7 @@ func ext۰reflect۰Zero(fr *frame, args []value) value {
 
 func reflectKind(t types.Type) reflect.Kind {
 	switch t := t.(type) {
-	case *types.Named:
+	case *types.Named, *types.Alias:
 		return reflectKind(t.Underlying())
 	case *types.Basic:
 		switch t.Kind() {
@@ -407,7 +407,11 @@ func ext۰reflect۰Value۰Elem(fr *frame, args []value) value {
 	case iface:
 		return makeReflectValue(x.t, x.v)
 	case *value:
-		return makeReflectValue(rV2T(args[0]).t.Underlying().(*types.Pointer).Elem(), *x)
+		var v value
+		if x != nil {
+			v = *x
+		}
+		return makeReflectValue(rV2T(args[0]).t.Underlying().(*types.Pointer).Elem(), v)
 	default:
 		panic(fmt.Sprintf("reflect.(Value).Elem(%T)", x))
 	}

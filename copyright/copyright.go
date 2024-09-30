@@ -9,7 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/ioutil"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,13 +18,18 @@ import (
 
 func checkCopyright(dir string) ([]string, error) {
 	var files []string
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
+		if d.IsDir() {
 			// Skip directories like ".git".
-			if strings.HasPrefix(info.Name(), ".") {
+			if strings.HasPrefix(d.Name(), ".") && d.Name() != "." && d.Name() != ".." {
+				return filepath.SkipDir
+			}
+			// Skip any directory that starts with an underscore, as the go
+			// command would.
+			if strings.HasPrefix(d.Name(), "_") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -59,7 +64,7 @@ func checkFile(toolsDir, filename string) (bool, error) {
 	if strings.HasSuffix(normalized, "cmd/goyacc/yacc.go") {
 		return false, nil
 	}
-	content, err := ioutil.ReadFile(filename)
+	content, err := os.ReadFile(filename)
 	if err != nil {
 		return false, err
 	}
@@ -86,8 +91,9 @@ func checkFile(toolsDir, filename string) (bool, error) {
 	return shouldAddCopyright, nil
 }
 
-// Copied from golang.org/x/tools/internal/lsp/source/util.go.
+// Copied from golang.org/x/tools/gopls/internal/golang/util.go.
 // Matches cgo generated comment as well as the proposed standard:
+//
 //	https://golang.org/s/generatedcode
 var generatedRx = regexp.MustCompile(`// .*DO NOT EDIT\.?`)
 

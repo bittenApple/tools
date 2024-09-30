@@ -13,5 +13,7 @@ import (
 
 func Test(t *testing.T) {
 	testdata := analysistest.TestData()
-	analysistest.Run(t, testdata, unusedresult.Analyzer, "a")
+	funcs := "typeparams/userdefs.MustUse,errors.New,fmt.Errorf,fmt.Sprintf,fmt.Sprint"
+	unusedresult.Analyzer.Flags.Set("funcs", funcs)
+	analysistest.Run(t, testdata, unusedresult.Analyzer, "a", "typeparams")
 }

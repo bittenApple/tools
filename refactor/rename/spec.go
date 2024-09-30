@@ -25,13 +25,13 @@ import (
 
 	"golang.org/x/tools/go/buildutil"
 	"golang.org/x/tools/go/loader"
+	"golang.org/x/tools/internal/typesinternal"
 )
 
 // A spec specifies an entity to rename.
 //
 // It is populated from an -offset flag or -from query;
 // see Usage for the allowed -from query forms.
-//
 type spec struct {
 	// pkg is the package containing the position
 	// specified by the -from or -offset flag.
@@ -413,7 +413,6 @@ func typeSwitchVar(info *types.Info, path []ast.Node) types.Object {
 // spec.fromName matching the spec.  On success, the result has exactly
 // one element unless spec.searchFor!="", in which case it has at least one
 // element.
-//
 func findObjects(info *loader.PackageInfo, spec *spec) ([]types.Object, error) {
 	if spec.pkgMember == "" {
 		if spec.searchFor == "" {
@@ -460,17 +459,14 @@ func findObjects(info *loader.PackageInfo, spec *spec) ([]types.Object, error) {
 		// search within named type.
 		obj, _, _ := types.LookupFieldOrMethod(tName.Type(), true, info.Pkg, spec.typeMember)
 		if obj == nil {
-			return nil, fmt.Errorf("cannot find field or method %q of %s %s.%s",
-				spec.typeMember, typeKind(tName.Type()), info.Pkg.Path(), tName.Name())
+			return nil, fmt.Errorf("cannot find field or method %q of %s.%s",
+				spec.typeMember, info.Pkg.Path(), tName.Name())
 		}
 
 		if spec.searchFor == "" {
 			// If it is an embedded field, return the type of the field.
 			if v, ok := obj.(*types.Var); ok && v.Anonymous() {
-				switch t := v.Type().(type) {
-				case *types.Pointer:
-					return []types.Object{t.Elem().(*types.Named).Obj()}, nil
-				case *types.Named:
+				if t, ok := typesinternal.Unpointer(v.Type()).(hasTypeName); ok {
 					return []types.Object{t.Obj()}, nil
 				}
 			}
@@ -483,7 +479,7 @@ func findObjects(info *loader.PackageInfo, spec *spec) ([]types.Object, error) {
 				spec.searchFor, objectKind(obj), info.Pkg.Path(), tName.Name(),
 				obj.Name())
 		}
-		if isInterface(tName.Type()) {
+		if types.IsInterface(tName.Type()) {
 			return nil, fmt.Errorf("cannot search for local name %q within abstract method (%s.%s).%s",
 				spec.searchFor, info.Pkg.Path(), tName.Name(), searchFunc.Name())
 		}
@@ -572,6 +568,7 @@ func ambiguityError(fset *token.FileSet, objects []types.Object) error {
 }
 
 // Matches cgo generated comment as well as the proposed standard:
+//
 //	https://golang.org/s/generatedcode
 var generatedRx = regexp.MustCompile(`// .*DO NOT EDIT\.?`)
 

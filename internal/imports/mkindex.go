@@ -19,7 +19,6 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
-	"io/ioutil"
 	"log"
 	"os"
 	"path"
@@ -88,7 +87,7 @@ func main() {
 	}
 
 	// Write out source file.
-	err = ioutil.WriteFile("pkgindex.go", src, 0644)
+	err = os.WriteFile("pkgindex.go", src, 0644)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -159,6 +158,7 @@ func loadExports(dir string) map[string]bool {
 		return nil
 	}
 	for _, file := range buildPkg.GoFiles {
+		// Legacy ast.Object resolution is needed here.
 		f, err := parser.ParseFile(fset, filepath.Join(dir, file), nil, 0)
 		if err != nil {
 			log.Printf("could not parse %q: %v", file, err)

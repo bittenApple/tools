@@ -15,12 +15,22 @@ import (
 	"context"
 	"os"
 
-	"golang.org/x/tools/gopls/internal/hooks"
-	"golang.org/x/tools/internal/lsp/cmd"
+	"golang.org/x/telemetry"
+	"golang.org/x/tools/gopls/internal/cmd"
+	versionpkg "golang.org/x/tools/gopls/internal/version"
 	"golang.org/x/tools/internal/tool"
 )
 
+var version = "" // if set by the linker, overrides the gopls version
+
 func main() {
+	versionpkg.VersionOverride = version
+
+	telemetry.Start(telemetry.Config{
+		ReportCrashes: true,
+		Upload:        true,
+	})
+
 	ctx := context.Background()
-	tool.Main(ctx, cmd.New("gopls", "", nil, hooks.Options), os.Args[1:])
+	tool.Main(ctx, cmd.New(), os.Args[1:])
 }

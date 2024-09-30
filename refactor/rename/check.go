@@ -13,6 +13,8 @@ import (
 	"go/types"
 
 	"golang.org/x/tools/go/loader"
+	"golang.org/x/tools/internal/typeparams"
+	"golang.org/x/tools/internal/typesinternal"
 	"golang.org/x/tools/refactor/satisfy"
 )
 
@@ -206,7 +208,6 @@ func (r *renamer) checkInLocalScope(from types.Object) {
 //
 // Removing the old name (and all references to it) is always safe, and
 // requires no checks.
-//
 func (r *renamer) checkInLexicalScope(from types.Object, info *loader.PackageInfo) {
 	b := from.Parent() // the block defining the 'from' object
 	if b != nil {
@@ -344,7 +345,7 @@ func forEachLexicalRef(info *loader.PackageInfo, obj types.Object, fn func(id *a
 			// Handle recursion ourselves for struct literals
 			// so we don't visit field identifiers.
 			tv := info.Types[n]
-			if _, ok := deref(tv.Type).Underlying().(*types.Struct); ok {
+			if is[*types.Struct](typeparams.CoreType(typeparams.Deref(tv.Type))) {
 				if n.Type != nil {
 					ast.Inspect(n.Type, visit)
 				}
@@ -436,8 +437,8 @@ func (r *renamer) checkStructField(from *types.Var) {
 		}
 		i++
 	}
-	if spec, ok := path[i].(*ast.TypeSpec); ok {
-		// This struct is also a named type.
+	if spec, ok := path[i].(*ast.TypeSpec); ok && !spec.Assign.IsValid() {
+		// This struct is also a defined type.
 		// We must check for direct (non-promoted) field/field
 		// and method/field conflicts.
 		named := info.Defs[spec.Name].Type()
@@ -450,7 +451,7 @@ func (r *renamer) checkStructField(from *types.Var) {
 			return // skip checkSelections to avoid redundant errors
 		}
 	} else {
-		// This struct is not a named type.
+		// This struct is not a defined type. (It may be an alias.)
 		// We need only check for direct (non-promoted) field/field conflicts.
 		T := info.Types[tStruct].Type.Underlying().(*types.Struct)
 		for i := 0; i < T.NumFields(); i++ {
@@ -463,15 +464,14 @@ func (r *renamer) checkStructField(from *types.Var) {
 		}
 	}
 
-	// Renaming an anonymous field requires renaming the type too. e.g.
+	// Renaming an anonymous field requires renaming the TypeName too. e.g.
 	// 	print(s.T)       // if we rename T to U,
 	// 	type T int       // this and
 	// 	var s struct {T} // this must change too.
 	if from.Anonymous() {
-		if named, ok := from.Type().(*types.Named); ok {
-			r.check(named.Obj())
-		} else if named, ok := deref(from.Type()).(*types.Named); ok {
-			r.check(named.Obj())
+		// A TypeParam cannot appear as an anonymous field.
+		if t, ok := typesinternal.Unpointer(from.Type()).(hasTypeName); ok {
+			r.check(t.Obj())
 		}
 	}
 
@@ -479,7 +479,10 @@ func (r *renamer) checkStructField(from *types.Var) {
 	r.checkSelections(from)
 }
 
-// checkSelection checks that all uses and selections that resolve to
+// hasTypeName abstracts the named types, *types.{Named,Alias,TypeParam}.
+type hasTypeName interface{ Obj() *types.TypeName }
+
+// checkSelections checks that all uses and selections that resolve to
 // the specified object would continue to do so after the renaming.
 func (r *renamer) checkSelections(from types.Object) {
 	for pkg, info := range r.packages {
@@ -568,13 +571,14 @@ func (r *renamer) selectionConflict(from types.Object, delta int, syntax *ast.Se
 
 // checkMethod performs safety checks for renaming a method.
 // There are three hazards:
-// - declaration conflicts
-// - selection ambiguity/changes
-// - entailed renamings of assignable concrete/interface types.
-//   We reject renamings initiated at concrete methods if it would
-//   change the assignability relation.  For renamings of abstract
-//   methods, we rename all methods transitively coupled to it via
-//   assignability.
+//   - declaration conflicts
+//   - selection ambiguity/changes
+//   - entailed renamings of assignable concrete/interface types.
+//
+// We reject renamings initiated at concrete methods if it would
+// change the assignability relation.  For renamings of abstract
+// methods, we rename all methods transitively coupled to it via
+// assignability.
 func (r *renamer) checkMethod(from *types.Func) {
 	// e.g. error.Error
 	if from.Pkg() == nil {
@@ -591,7 +595,7 @@ func (r *renamer) checkMethod(from *types.Func) {
 	// Check for conflict at point of declaration.
 	// Check to ensure preservation of assignability requirements.
 	R := recv(from).Type()
-	if isInterface(R) {
+	if types.IsInterface(R) {
 		// Abstract method
 
 		// declaration
@@ -608,7 +612,7 @@ func (r *renamer) checkMethod(from *types.Func) {
 		for _, info := range r.packages {
 			// Start with named interface types (better errors)
 			for _, obj := range info.Defs {
-				if obj, ok := obj.(*types.TypeName); ok && isInterface(obj.Type()) {
+				if obj, ok := obj.(*types.TypeName); ok && types.IsInterface(obj.Type()) {
 					f, _, _ := types.LookupFieldOrMethod(
 						obj.Type(), false, from.Pkg(), from.Name())
 					if f == nil {
@@ -680,7 +684,7 @@ func (r *renamer) checkMethod(from *types.Func) {
 			// yields abstract method I.f.  This can make error
 			// messages less than obvious.
 			//
-			if !isInterface(key.RHS) {
+			if !types.IsInterface(key.RHS) {
 				// The logic below was derived from checkSelections.
 
 				rtosel := rmethods.Lookup(from.Pkg(), r.to)
@@ -755,7 +759,7 @@ func (r *renamer) checkMethod(from *types.Func) {
 		//
 		for key := range r.satisfy() {
 			// key = (lhs, rhs) where lhs is always an interface.
-			if isInterface(key.RHS) {
+			if types.IsInterface(key.RHS) {
 				continue
 			}
 			rsel := r.msets.MethodSet(key.RHS).Lookup(from.Pkg(), from.Name())
@@ -777,7 +781,7 @@ func (r *renamer) checkMethod(from *types.Func) {
 				var iface string
 
 				I := recv(imeth).Type()
-				if named, ok := I.(*types.Named); ok {
+				if named, ok := I.(hasTypeName); ok {
 					pos = named.Obj().Pos()
 					iface = "interface " + named.Obj().Name()
 				} else {
@@ -844,15 +848,4 @@ func someUse(info *loader.PackageInfo, obj types.Object) *ast.Ident {
 		}
 	}
 	return nil
-}
-
-// -- Plundered from golang.org/x/tools/go/ssa -----------------
-
-func isInterface(T types.Type) bool { return types.IsInterface(T) }
-
-func deref(typ types.Type) types.Type {
-	if p, _ := typ.(*types.Pointer); p != nil {
-		return p.Elem()
-	}
-	return typ
 }

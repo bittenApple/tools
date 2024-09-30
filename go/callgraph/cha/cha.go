@@ -20,80 +20,25 @@
 // Since CHA conservatively assumes that all functions are address-taken
 // and all concrete types are put into interfaces, it is sound to run on
 // partial programs, such as libraries without a main or test function.
-//
 package cha // import "golang.org/x/tools/go/callgraph/cha"
 
-import (
-	"go/types"
+// TODO(zpavlinovic): update CHA for how it handles generic function bodies.
 
+import (
 	"golang.org/x/tools/go/callgraph"
+	"golang.org/x/tools/go/callgraph/internal/chautil"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
-	"golang.org/x/tools/go/types/typeutil"
 )
 
 // CallGraph computes the call graph of the specified program using the
 // Class Hierarchy Analysis algorithm.
-//
 func CallGraph(prog *ssa.Program) *callgraph.Graph {
 	cg := callgraph.New(nil) // TODO(adonovan) eliminate concept of rooted callgraph
 
 	allFuncs := ssautil.AllFunctions(prog)
 
-	// funcsBySig contains all functions, keyed by signature.  It is
-	// the effective set of address-taken functions used to resolve
-	// a dynamic call of a particular signature.
-	var funcsBySig typeutil.Map // value is []*ssa.Function
-
-	// methodsByName contains all methods,
-	// grouped by name for efficient lookup.
-	// (methodsById would be better but not every SSA method has a go/types ID.)
-	methodsByName := make(map[string][]*ssa.Function)
-
-	// An imethod represents an interface method I.m.
-	// (There's no go/types object for it;
-	// a *types.Func may be shared by many interfaces due to interface embedding.)
-	type imethod struct {
-		I  *types.Interface
-		id string
-	}
-	// methodsMemo records, for every abstract method call I.m on
-	// interface type I, the set of concrete methods C.m of all
-	// types C that satisfy interface I.
-	//
-	// Abstract methods may be shared by several interfaces,
-	// hence we must pass I explicitly, not guess from m.
-	//
-	// methodsMemo is just a cache, so it needn't be a typeutil.Map.
-	methodsMemo := make(map[imethod][]*ssa.Function)
-	lookupMethods := func(I *types.Interface, m *types.Func) []*ssa.Function {
-		id := m.Id()
-		methods, ok := methodsMemo[imethod{I, id}]
-		if !ok {
-			for _, f := range methodsByName[m.Name()] {
-				C := f.Signature.Recv().Type() // named or *named
-				if types.Implements(C, I) {
-					methods = append(methods, f)
-				}
-			}
-			methodsMemo[imethod{I, id}] = methods
-		}
-		return methods
-	}
-
-	for f := range allFuncs {
-		if f.Signature.Recv() == nil {
-			// Package initializers can never be address-taken.
-			if f.Name() == "init" && f.Synthetic == "package initializer" {
-				continue
-			}
-			funcs, _ := funcsBySig.At(f.Signature).([]*ssa.Function)
-			funcs = append(funcs, f)
-			funcsBySig.Set(f.Signature, funcs)
-		} else {
-			methodsByName[f.Name()] = append(methodsByName[f.Name()], f)
-		}
-	}
+	calleesOf := lazyCallees(allFuncs)
 
 	addEdge := func(fnode *callgraph.Node, site ssa.CallInstruction, g *ssa.Function) {
 		gnode := cg.CreateNode(g)
@@ -106,10 +51,6 @@ func CallGraph(prog *ssa.Program) *callgraph.Graph {
 		// (io.Writer).Write is assumed to call every concrete
 		// Write method in the program, the call graph can
 		// contain a lot of duplication.
-		//
-		// TODO(adonovan): opt: consider factoring the callgraph
-		// API so that the Callers component of each edge is a
-		// slice of nodes, not a singleton.
 		for _, g := range callees {
 			addEdge(fnode, site, g)
 		}
@@ -120,15 +61,10 @@ func CallGraph(prog *ssa.Program) *callgraph.Graph {
 		for _, b := range f.Blocks {
 			for _, instr := range b.Instrs {
 				if site, ok := instr.(ssa.CallInstruction); ok {
-					call := site.Common()
-					if call.IsInvoke() {
-						tiface := call.Value.Type().Underlying().(*types.Interface)
-						addEdges(fnode, site, lookupMethods(tiface, call.Method))
-					} else if g := call.StaticCallee(); g != nil {
+					if g := site.Common().StaticCallee(); g != nil {
 						addEdge(fnode, site, g)
-					} else if _, ok := call.Value.(*ssa.Builtin); !ok {
-						callees, _ := funcsBySig.At(call.Signature()).([]*ssa.Function)
-						addEdges(fnode, site, callees)
+					} else {
+						addEdges(fnode, site, calleesOf(site))
 					}
 				}
 			}
@@ -137,3 +73,5 @@ func CallGraph(prog *ssa.Program) *callgraph.Graph {
 
 	return cg
 }
+
+var lazyCallees = chautil.LazyCallees

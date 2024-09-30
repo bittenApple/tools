@@ -14,7 +14,6 @@ import (
 	"runtime"
 	"runtime/pprof"
 
-	"golang.org/x/tools/go/buildutil"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/interp"
@@ -38,16 +37,17 @@ T	[T]race execution of the program.  Best for single-threaded programs!
 	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 
 	args stringListValue
+
+	tagsFlag = flag.String("tags", "", "comma-separated list of extra build tags (see: go help buildconstraint)")
 )
 
 func init() {
 	flag.Var(&mode, "build", ssa.BuilderModeDoc)
-	flag.Var((*buildutil.TagsFlag)(&build.Default.BuildTags), "tags", buildutil.TagsFlagDoc)
 	flag.Var(&args, "arg", "add argument to interpreted program")
 }
 
 const usage = `SSA builder and interpreter.
-Usage: ssadump [-build=[DBCSNFL]] [-test] [-run] [-interp=[TR]] [-arg=...] package...
+Usage: ssadump [-build=[DBCSNFLG]] [-test] [-run] [-interp=[TR]] [-arg=...] package...
 Use -help flag to display options.
 
 Examples:
@@ -55,7 +55,8 @@ Examples:
 % ssadump -build=F -test fmt             # dump SSA form of a package and its tests
 % ssadump -run -interp=T hello.go        # interpret a program, with tracing
 
-The -run flag causes ssadump to run the first package named main.
+The -run flag causes ssadump to build the code in a runnable form and run the first
+package named main.
 
 Interpretation of the standard "testing" package is no longer supported.
 `
@@ -75,8 +76,9 @@ func doMain() error {
 	}
 
 	cfg := &packages.Config{
-		Mode:  packages.LoadSyntax,
-		Tests: *testFlag,
+		BuildFlags: []string{"-tags=" + *tagsFlag},
+		Mode:       packages.LoadSyntax,
+		Tests:      *testFlag,
 	}
 
 	// Choose types.Sizes from conf.Build.
@@ -130,6 +132,11 @@ func doMain() error {
 		return fmt.Errorf("packages contain errors")
 	}
 
+	// Turn on instantiating generics during build if the program will be run.
+	if *runFlag {
+		mode |= ssa.InstantiateGenerics
+	}
+
 	// Create SSA-form program representation.
 	prog, pkgs := ssautil.AllPackages(initial, mode)
 
@@ -151,12 +158,15 @@ func doMain() error {
 		// Build SSA for all packages.
 		prog.Build()
 
-		// The interpreter needs the runtime package.
-		// It is a limitation of go/packages that
-		// we cannot add "runtime" to its initial set,
-		// we can only check that it is present.
-		if prog.ImportedPackage("runtime") == nil {
-			return fmt.Errorf("-run: program does not depend on runtime")
+		// Earlier versions of the interpreter needed the runtime
+		// package; however, interp cannot handle unsafe constructs
+		// used during runtime's package initialization at the moment.
+		// The key construct blocking support is:
+		//    *((*T)(unsafe.Pointer(p)))
+		// Unfortunately, this means only trivial programs can be
+		// interpreted by ssadump.
+		if prog.ImportedPackage("runtime") != nil {
+			return fmt.Errorf("-run: program depends on runtime package (interpreter can run only trivial programs)")
 		}
 
 		if runtime.GOARCH != build.Default.GOARCH {

@@ -7,7 +7,8 @@
 // It expects the location of the file as the first command-line argument.
 //
 // Example GOAUTH usage:
-// 	export GOAUTH="netrcauth $HOME/.netrc"
+//
+//	export GOAUTH="netrcauth $HOME/.netrc"
 //
 // See https://www.gnu.org/software/inetutils/manual/html_node/The-_002enetrc-file.html
 // or run 'man 5 netrc' for a description of the .netrc file format.
@@ -15,7 +16,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -40,7 +40,7 @@ func main() {
 
 	path := os.Args[1]
 
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return

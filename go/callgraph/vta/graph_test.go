@@ -13,28 +13,31 @@ import (
 	"testing"
 
 	"golang.org/x/tools/go/callgraph/cha"
+	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
 func TestNodeInterface(t *testing.T) {
 	// Since ssa package does not allow explicit creation of ssa
-	// values, we use the values from the program testdata/simple.go:
+	// values, we use the values from the program testdata/src/simple.go:
 	//   - basic type int
 	//   - struct X with two int fields a and b
 	//   - global variable "gl"
+	//   - "foo" function
 	//   - "main" function and its
 	//   - first register instruction t0 := *gl
-	prog, _, err := testProg("testdata/simple.go")
+	prog, _, err := testProg(t, "testdata/src/simple.go", ssa.BuilderMode(0))
 	if err != nil {
-		t.Fatalf("couldn't load testdata/simple.go program: %v", err)
+		t.Fatalf("couldn't load testdata/src/simple.go program: %v", err)
 	}
 
 	pkg := prog.AllPackages()[0]
 	main := pkg.Func("main")
+	foo := pkg.Func("foo")
 	reg := firstRegInstr(main) // t0 := *gl
 	X := pkg.Type("X").Type()
 	gl := pkg.Var("gl")
-	glPtrType, ok := gl.Type().(*types.Pointer)
+	glPtrType, ok := types.Unalias(gl.Type()).(*types.Pointer)
 	if !ok {
 		t.Fatalf("could not cast gl variable to pointer type")
 	}
@@ -42,6 +45,8 @@ func TestNodeInterface(t *testing.T) {
 
 	pint := types.NewPointer(bint)
 	i := types.NewInterface(nil, nil)
+
+	voidFunc := main.Signature.Underlying()
 
 	for _, test := range []struct {
 		n node
@@ -59,13 +64,15 @@ func TestNodeInterface(t *testing.T) {
 		{global{val: gl}, "Global(gl)", gl.Type()},
 		{local{val: reg}, "Local(t0)", bint},
 		{indexedLocal{val: reg, typ: X, index: 0}, "Local(t0[0])", X},
-		{function{f: main}, "Function(main)", main.Signature.Underlying()},
+		{function{f: main}, "Function(main)", voidFunc},
+		{resultVar{f: foo, index: 0}, "Return(foo[r])", bint},
 		{nestedPtrInterface{typ: i}, "PtrInterface(interface{})", i},
+		{nestedPtrFunction{typ: voidFunc}, "PtrFunction(func())", voidFunc},
 		{panicArg{}, "Panic", nil},
 		{recoverReturn{}, "Recover", nil},
 	} {
-		if test.s != test.n.String() {
-			t.Errorf("want %s; got %s", test.s, test.n.String())
+		if removeModulePrefix(test.s) != removeModulePrefix(test.n.String()) {
+			t.Errorf("want %s; got %s", removeModulePrefix(test.s), removeModulePrefix(test.n.String()))
 		}
 		if test.t != test.n.Type() {
 			t.Errorf("want %s; got %s", test.t, test.n.Type())
@@ -73,11 +80,17 @@ func TestNodeInterface(t *testing.T) {
 	}
 }
 
+// removeModulePrefix removes the "x.io/" module name prefix throughout s.
+// (It is added by testProg.)
+func removeModulePrefix(s string) string {
+	return strings.ReplaceAll(s, "x.io/", "")
+}
+
 func TestVtaGraph(t *testing.T) {
 	// Get the basic type int from a real program.
-	prog, _, err := testProg("testdata/simple.go")
+	prog, _, err := testProg(t, "testdata/src/simple.go", ssa.BuilderMode(0))
 	if err != nil {
-		t.Fatalf("couldn't load testdata/simple.go program: %v", err)
+		t.Fatalf("couldn't load testdata/src/simple.go program: %v", err)
 	}
 
 	glPtrType, ok := prog.AllPackages()[0].Var("gl").Type().(*types.Pointer)
@@ -106,9 +119,9 @@ func TestVtaGraph(t *testing.T) {
 	g.addEdge(n1, n3)
 
 	want := vtaGraph{
-		n1: map[node]bool{n3: true},
-		n2: map[node]bool{n3: true, n4: true},
-		n3: map[node]bool{n4: true},
+		n1: map[node]empty{n3: empty{}},
+		n2: map[node]empty{n3: empty{}, n4: empty{}},
+		n3: map[node]empty{n4: empty{}},
 	}
 
 	if !reflect.DeepEqual(want, g) {
@@ -124,7 +137,7 @@ func TestVtaGraph(t *testing.T) {
 		{n3, 1},
 		{n4, 0},
 	} {
-		if sl := len(g.successors(test.n)); sl != test.l {
+		if sl := len(g[test.n]); sl != test.l {
 			t.Errorf("want %d successors; got %d", test.l, sl)
 		}
 	}
@@ -143,51 +156,53 @@ func vtaGraphStr(g vtaGraph) []string {
 		}
 		sort.Strings(succStr)
 		entry := fmt.Sprintf("%v -> %v", n.String(), strings.Join(succStr, ", "))
-		vgs = append(vgs, entry)
+		vgs = append(vgs, removeModulePrefix(entry))
 	}
 	return vgs
 }
 
-// subGraph checks if a graph `g1` is a subgraph of graph `g2`.
-// Assumes that each element in `g1` and `g2` is an edge set
-// for a particular node in a fixed yet arbitrary format.
-func subGraph(g1, g2 []string) bool {
-	m := make(map[string]bool)
-	for _, s := range g2 {
-		m[s] = true
+// setdiff returns the set difference of `X-Y` or {s | s ∈ X, s ∉ Y }.
+func setdiff(X, Y []string) []string {
+	y := make(map[string]bool)
+	var delta []string
+	for _, s := range Y {
+		y[s] = true
 	}
 
-	for _, s := range g1 {
-		if _, ok := m[s]; !ok {
-			return false
+	for _, s := range X {
+		if _, ok := y[s]; !ok {
+			delta = append(delta, s)
 		}
 	}
-	return true
+	sort.Strings(delta)
+	return delta
 }
 
 func TestVTAGraphConstruction(t *testing.T) {
 	for _, file := range []string{
-		"testdata/store.go",
-		"testdata/phi.go",
-		"testdata/type_conversions.go",
-		"testdata/type_assertions.go",
-		"testdata/fields.go",
-		"testdata/node_uniqueness.go",
-		"testdata/store_load_alias.go",
-		"testdata/phi_alias.go",
-		"testdata/channels.go",
-		"testdata/select.go",
-		"testdata/stores_arrays.go",
-		"testdata/maps.go",
-		"testdata/ranges.go",
-		"testdata/closures.go",
-		"testdata/static_calls.go",
-		"testdata/dynamic_calls.go",
-		"testdata/returns.go",
-		"testdata/panic.go",
+		"testdata/src/store.go",
+		"testdata/src/phi.go",
+		"testdata/src/type_conversions.go",
+		"testdata/src/type_assertions.go",
+		"testdata/src/fields.go",
+		"testdata/src/node_uniqueness.go",
+		"testdata/src/store_load_alias.go",
+		"testdata/src/phi_alias.go",
+		"testdata/src/channels.go",
+		"testdata/src/generic_channels.go",
+		"testdata/src/select.go",
+		"testdata/src/stores_arrays.go",
+		"testdata/src/maps.go",
+		"testdata/src/ranges.go",
+		"testdata/src/closures.go",
+		"testdata/src/function_alias.go",
+		"testdata/src/static_calls.go",
+		"testdata/src/dynamic_calls.go",
+		"testdata/src/returns.go",
+		"testdata/src/panic.go",
 	} {
 		t.Run(file, func(t *testing.T) {
-			prog, want, err := testProg(file)
+			prog, want, err := testProg(t, file, ssa.BuilderMode(0))
 			if err != nil {
 				t.Fatalf("couldn't load test file '%s': %s", file, err)
 			}
@@ -195,9 +210,20 @@ func TestVTAGraphConstruction(t *testing.T) {
 				t.Fatalf("couldn't find want in `%s`", file)
 			}
 
-			g, _ := typePropGraph(ssautil.AllFunctions(prog), cha.CallGraph(prog))
-			if gs := vtaGraphStr(g); !subGraph(want, gs) {
-				t.Errorf("`%s`: want superset of %v;\n got %v", file, want, gs)
+			fs := ssautil.AllFunctions(prog)
+
+			// First test propagation with lazy-CHA initial call graph.
+			g, _ := typePropGraph(fs, makeCalleesFunc(fs, nil))
+			got := vtaGraphStr(g)
+			if diff := setdiff(want, got); len(diff) > 0 {
+				t.Errorf("`%s`: want superset of %v;\n got %v\ndiff: %v", file, want, got, diff)
+			}
+
+			// Repeat the test with explicit CHA initial call graph.
+			g, _ = typePropGraph(fs, makeCalleesFunc(fs, cha.CallGraph(prog)))
+			got = vtaGraphStr(g)
+			if diff := setdiff(want, got); len(diff) > 0 {
+				t.Errorf("`%s`: want superset of %v;\n got %v\ndiff: %v", file, want, got, diff)
 			}
 		})
 	}

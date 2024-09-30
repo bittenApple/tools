@@ -7,8 +7,8 @@ package vta
 import (
 	"go/types"
 
-	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/internal/typeparams"
 )
 
 func canAlias(n1, n2 node) bool {
@@ -19,8 +19,11 @@ func isReferenceNode(n node) bool {
 	if _, ok := n.(nestedPtrInterface); ok {
 		return true
 	}
+	if _, ok := n.(nestedPtrFunction); ok {
+		return true
+	}
 
-	if _, ok := n.Type().(*types.Pointer); ok {
+	if _, ok := types.Unalias(n.Type()).(*types.Pointer); ok {
 		return true
 	}
 
@@ -29,11 +32,13 @@ func isReferenceNode(n node) bool {
 
 // hasInFlow checks if a concrete type can flow to node `n`.
 // Returns yes iff the type of `n` satisfies one the following:
-//  1) is an interface
-//  2) is a (nested) pointer to interface (needed for, say,
+//  1. is an interface
+//  2. is a (nested) pointer to interface (needed for, say,
 //     slice elements of nested pointers to interface type)
-//  3) is a function type (needed for higher-order type flow)
-//  4) is a global Recover or Panic node
+//  3. is a function type (needed for higher-order type flow)
+//  4. is a (nested) pointer to function (needed for, say,
+//     slice elements of nested pointers to function type)
+//  5. is a global Recover or Panic node
 func hasInFlow(n node) bool {
 	if _, ok := n.(panicArg); ok {
 		return true
@@ -44,31 +49,18 @@ func hasInFlow(n node) bool {
 
 	t := n.Type()
 
-	if _, ok := t.Underlying().(*types.Signature); ok {
-		return true
-	}
-
 	if i := interfaceUnderPtr(t); i != nil {
 		return true
 	}
-
-	return isInterface(t)
-}
-
-// hasInitialTypes check if a node can have initial types.
-// Returns true iff `n` is not a panic or recover node as
-// those are artifical.
-func hasInitialTypes(n node) bool {
-	switch n.(type) {
-	case panicArg, recoverReturn:
-		return false
-	default:
+	if f := functionUnderPtr(t); f != nil {
 		return true
 	}
+
+	return types.IsInterface(t) || isFunction(t)
 }
 
-func isInterface(t types.Type) bool {
-	_, ok := t.Underlying().(*types.Interface)
+func isFunction(t types.Type) bool {
+	_, ok := t.Underlying().(*types.Signature)
 	return ok
 }
 
@@ -76,54 +68,100 @@ func isInterface(t types.Type) bool {
 // pointer to interface and if yes, returns the interface type.
 // Otherwise, returns nil.
 func interfaceUnderPtr(t types.Type) types.Type {
-	p, ok := t.Underlying().(*types.Pointer)
-	if !ok {
-		return nil
-	}
+	seen := make(map[types.Type]bool)
+	var visit func(types.Type) types.Type
+	visit = func(t types.Type) types.Type {
+		if seen[t] {
+			return nil
+		}
+		seen[t] = true
 
-	if isInterface(p.Elem()) {
-		return p.Elem()
-	}
+		p, ok := t.Underlying().(*types.Pointer)
+		if !ok {
+			return nil
+		}
 
-	return interfaceUnderPtr(p.Elem())
+		if types.IsInterface(p.Elem()) {
+			return p.Elem()
+		}
+
+		return visit(p.Elem())
+	}
+	return visit(t)
+}
+
+// functionUnderPtr checks if type `t` is a potentially nested
+// pointer to function type and if yes, returns the function type.
+// Otherwise, returns nil.
+func functionUnderPtr(t types.Type) types.Type {
+	seen := make(map[types.Type]bool)
+	var visit func(types.Type) types.Type
+	visit = func(t types.Type) types.Type {
+		if seen[t] {
+			return nil
+		}
+		seen[t] = true
+
+		p, ok := t.Underlying().(*types.Pointer)
+		if !ok {
+			return nil
+		}
+
+		if isFunction(p.Elem()) {
+			return p.Elem()
+		}
+
+		return visit(p.Elem())
+	}
+	return visit(t)
 }
 
 // sliceArrayElem returns the element type of type `t` that is
-// expected to be a (pointer to) array or slice, consistent with
+// expected to be a (pointer to) array, slice or string, consistent with
 // the ssa.Index and ssa.IndexAddr instructions. Panics otherwise.
 func sliceArrayElem(t types.Type) types.Type {
-	u := t.Underlying()
-
-	if p, ok := u.(*types.Pointer); ok {
-		u = p.Elem().Underlying()
+	switch u := t.Underlying().(type) {
+	case *types.Pointer:
+		switch e := u.Elem().Underlying().(type) {
+		case *types.Array:
+			return e.Elem()
+		case *types.Interface:
+			return sliceArrayElem(e) // e is a type param with matching element types.
+		default:
+			panic(t)
+		}
+	case *types.Array:
+		return u.Elem()
+	case *types.Slice:
+		return u.Elem()
+	case *types.Basic:
+		return types.Typ[types.Byte]
+	case *types.Interface: // type param.
+		terms, err := typeparams.InterfaceTermSet(u)
+		if err != nil || len(terms) == 0 {
+			panic(t)
+		}
+		return sliceArrayElem(terms[0].Type()) // Element types must match.
+	default:
+		panic(t)
 	}
-
-	if a, ok := u.(*types.Array); ok {
-		return a.Elem()
-	}
-	return u.(*types.Slice).Elem()
 }
 
-// siteCallees computes a set of callees for call site `c` given program `callgraph`.
-func siteCallees(c ssa.CallInstruction, callgraph *callgraph.Graph) []*ssa.Function {
-	var matches []*ssa.Function
-
-	node := callgraph.Nodes[c.Parent()]
-	if node == nil {
-		return nil
-	}
-
-	for _, edge := range node.Out {
-		callee := edge.Callee.Func
-		// Skip synthetic functions wrapped around source functions.
-		if edge.Site == c && callee.Synthetic == "" {
-			matches = append(matches, callee)
+// siteCallees returns a go1.23 iterator for the callees for call site `c`.
+func siteCallees(c ssa.CallInstruction, callees calleesFunc) func(yield func(*ssa.Function) bool) {
+	// TODO: when x/tools uses go1.23, change callers to use range-over-func
+	// (https://go.dev/issue/65237).
+	return func(yield func(*ssa.Function) bool) {
+		for _, callee := range callees(c) {
+			if !yield(callee) {
+				return
+			}
 		}
 	}
-	return matches
 }
 
 func canHaveMethods(t types.Type) bool {
+	t = types.Unalias(t)
 	if _, ok := t.(*types.Named); ok {
 		return true
 	}
@@ -148,20 +186,4 @@ func calls(f *ssa.Function) []ssa.CallInstruction {
 		}
 	}
 	return calls
-}
-
-// intersect produces an intersection of functions in `fs1` and `fs2`.
-func intersect(fs1, fs2 []*ssa.Function) []*ssa.Function {
-	m := make(map[*ssa.Function]bool)
-	for _, f := range fs1 {
-		m[f] = true
-	}
-
-	var res []*ssa.Function
-	for _, f := range fs2 {
-		if m[f] {
-			res = append(res, f)
-		}
-	}
-	return res
 }

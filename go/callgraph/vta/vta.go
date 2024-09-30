@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file.
 
 // Package vta computes the call graph of a Go program using the Variable
-// Type Analysis (VTA) algorithm originally described in ``Practical Virtual
+// Type Analysis (VTA) algorithm originally described in "Practical Virtual
 // Method Call Resolution for Java," Vijay Sundaresan, Laurie Hendren,
 // Chrislain Razafimahefa, Raja Vallée-Rai, Patrick Lam, Etienne Gagnon, and
 // Charles Godin.
@@ -18,22 +18,23 @@
 //
 // A type propagation is a directed, labeled graph. A node can represent
 // one of the following:
-//  - A field of a struct type.
-//  - A local (SSA) variable of a method/function.
-//  - All pointers to a non-interface type.
-//  - The return value of a method.
-//  - All elements in an array.
-//  - All elements in a slice.
-//  - All elements in a map.
-//  - All elements in a channel.
-//  - A global variable.
+//   - A field of a struct type.
+//   - A local (SSA) variable of a method/function.
+//   - All pointers to a non-interface type.
+//   - The return value of a method.
+//   - All elements in an array.
+//   - All elements in a slice.
+//   - All elements in a map.
+//   - All elements in a channel.
+//   - A global variable.
+//
 // In addition, the implementation used in this package introduces
 // a few Go specific kinds of nodes:
-//  - (De)references of nested pointers to interfaces are modeled
-//    as a unique nestedPtrInterface node in the type propagation graph.
-//  - Each function literal is represented as a function node whose
-//    internal value is the (SSA) representation of the function. This
-//    is done to precisely infer flow of higher-order functions.
+//   - (De)references of nested pointers to interfaces are modeled
+//     as a unique nestedPtrInterface node in the type propagation graph.
+//   - Each function literal is represented as a function node whose
+//     internal value is the (SSA) representation of the function. This
+//     is done to precisely infer flow of higher-order functions.
 //
 // Edges in the graph represent flow of types (and function literals) through
 // the program. That is, the model 1) typing constraints that are induced by
@@ -51,8 +52,9 @@
 // it may have. This information is then used to construct the call graph.
 // For each unresolved call site, vta uses the set of types and functions
 // reaching the node representing the call site to create a set of callees.
-
 package vta
+
+// TODO(zpavlinovic): update VTA for how it handles generic function bodies and instantiation wrappers.
 
 import (
 	"go/types"
@@ -62,15 +64,21 @@ import (
 )
 
 // CallGraph uses the VTA algorithm to compute call graph for all functions
-// f such that f:true is in `funcs`. VTA refines the results of 'initial'
-// callgraph and uses it to establish interprocedural data flow. VTA is
-// sound if 'initial` is sound modulo reflection and unsage. The resulting
-// callgraph does not have a root node.
+// f:true in funcs. VTA refines the results of initial call graph and uses it
+// to establish interprocedural type flow. If initial is nil, VTA uses a more
+// efficient approach to construct a CHA call graph.
+//
+// The resulting graph does not have a root node.
+//
+// CallGraph does not make any assumptions on initial types global variables
+// and function/method inputs can have. CallGraph is then sound, modulo use of
+// reflection and unsafe, if the initial call graph is sound.
 func CallGraph(funcs map[*ssa.Function]bool, initial *callgraph.Graph) *callgraph.Graph {
-	vtaG, canon := typePropGraph(funcs, initial)
+	callees := makeCalleesFunc(funcs, initial)
+	vtaG, canon := typePropGraph(funcs, callees)
 	types := propagate(vtaG, canon)
 
-	c := &constructor{types: types, initial: initial, cache: make(methodCache)}
+	c := &constructor{types: types, callees: callees, cache: make(methodCache)}
 	return c.construct(funcs)
 }
 
@@ -80,7 +88,7 @@ func CallGraph(funcs map[*ssa.Function]bool, initial *callgraph.Graph) *callgrap
 type constructor struct {
 	types   propTypeMap
 	cache   methodCache
-	initial *callgraph.Graph
+	callees calleesFunc
 }
 
 func (c *constructor) construct(funcs map[*ssa.Function]bool) *callgraph.Graph {
@@ -96,15 +104,15 @@ func (c *constructor) construct(funcs map[*ssa.Function]bool) *callgraph.Graph {
 func (c *constructor) constrct(g *callgraph.Graph, f *ssa.Function) {
 	caller := g.CreateNode(f)
 	for _, call := range calls(f) {
-		for _, c := range c.callees(call) {
+		for _, c := range c.resolves(call) {
 			callgraph.AddEdge(caller, call, g.CreateNode(c))
 		}
 	}
 }
 
-// callees computes the set of functions to which VTA resolves `c`. The resolved
-// functions are intersected with functions to which `initial` resolves `c`.
-func (c *constructor) callees(call ssa.CallInstruction) []*ssa.Function {
+// resolves computes the set of functions to which VTA resolves `c`. The resolved
+// functions are intersected with functions to which `c.initial` resolves `c`.
+func (c *constructor) resolves(call ssa.CallInstruction) []*ssa.Function {
 	cc := call.Common()
 	if cc.StaticCallee() != nil {
 		return []*ssa.Function{cc.StaticCallee()}
@@ -116,22 +124,33 @@ func (c *constructor) callees(call ssa.CallInstruction) []*ssa.Function {
 	}
 
 	// Cover the case of dynamic higher-order and interface calls.
-	return intersect(resolve(call, c.types, c.cache), siteCallees(call, c.initial))
+	var res []*ssa.Function
+	resolved := resolve(call, c.types, c.cache)
+	siteCallees(call, c.callees)(func(f *ssa.Function) bool {
+		if _, ok := resolved[f]; ok {
+			res = append(res, f)
+		}
+		return true
+	})
+	return res
 }
 
 // resolve returns a set of functions `c` resolves to based on the
 // type propagation results in `types`.
-func resolve(c ssa.CallInstruction, types propTypeMap, cache methodCache) []*ssa.Function {
+func resolve(c ssa.CallInstruction, types propTypeMap, cache methodCache) map[*ssa.Function]empty {
+	fns := make(map[*ssa.Function]empty)
 	n := local{val: c.Common().Value}
-	var funcs []*ssa.Function
-	for p := range types.propTypes(n) {
-		funcs = append(funcs, propFunc(p, c, cache)...)
-	}
-	return funcs
+	types.propTypes(n)(func(p propType) bool {
+		for _, f := range propFunc(p, c, cache) {
+			fns[f] = empty{}
+		}
+		return true
+	})
+	return fns
 }
 
 // propFunc returns the functions modeled with the propagation type `p`
-// assigned to call site `c`. If no such funciton exists, nil is returned.
+// assigned to call site `c`. If no such function exists, nil is returned.
 func propFunc(p propType, c ssa.CallInstruction, cache methodCache) []*ssa.Function {
 	if p.f != nil {
 		return []*ssa.Function{p.f}

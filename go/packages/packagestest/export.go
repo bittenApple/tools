@@ -9,7 +9,7 @@ By changing the exporter used, you can create projects for multiple build
 systems from the same description, and run the same tests on them in many
 cases.
 
-Example
+# Example
 
 As an example of packagestest use, consider the following test that runs
 the 'go list' command on the specified modules:
@@ -60,7 +60,6 @@ Running the test with verbose output will print:
 	        main_test.go:36: 'go list gopher.example/...' with Modules mode layout:
 	            gopher.example/repoa/a
 	            gopher.example/repob/b
-
 */
 package packagestest
 
@@ -70,7 +69,6 @@ import (
 	"fmt"
 	"go/token"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -80,9 +78,7 @@ import (
 
 	"golang.org/x/tools/go/expect"
 	"golang.org/x/tools/go/packages"
-	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/internal/testenv"
-	"golang.org/x/xerrors"
 )
 
 var (
@@ -131,7 +127,7 @@ type Exported struct {
 	primary  string                       // the first non GOROOT module that was exported
 	written  map[string]map[string]string // the full set of exported files
 	notes    []*expect.Note               // The list of expectations extracted from go source files
-	markers  map[string]span.Range        // The set of markers extracted from go source files
+	markers  map[string]Range             // The set of markers extracted from go source files
 }
 
 // Exporter implementations are responsible for converting from the generic description of some
@@ -151,7 +147,7 @@ type Exporter interface {
 
 // All is the list of known exporters.
 // This is used by TestAll to run tests with all the exporters.
-var All []Exporter
+var All = []Exporter{GOPATH, Modules}
 
 // TestAll invokes the testing function once for each exporter registered in
 // the All global.
@@ -201,7 +197,7 @@ func Export(t testing.TB, exporter Exporter, modules []Module) *Exported {
 
 	dirname := strings.Replace(t.Name(), "/", "_", -1)
 	dirname = strings.Replace(dirname, "#", "_", -1) // duplicate subtests get a #NNN suffix.
-	temp, err := ioutil.TempDir("", dirname)
+	temp, err := os.MkdirTemp("", dirname)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,6 +215,9 @@ func Export(t testing.TB, exporter Exporter, modules []Module) *Exported {
 		primary:       modules[0].Name,
 		written:       map[string]map[string]string{},
 		ExpectFileSet: token.NewFileSet(),
+	}
+	if testing.Verbose() {
+		exported.Config.Logf = t.Logf
 	}
 	defer func() {
 		if t.Failed() || t.Skipped() {
@@ -248,13 +247,13 @@ func Export(t testing.TB, exporter Exporter, modules []Module) *Exported {
 			switch value := value.(type) {
 			case Writer:
 				if err := value(fullpath); err != nil {
-					if xerrors.Is(err, ErrUnsupported) {
+					if errors.Is(err, ErrUnsupported) {
 						t.Skip(err)
 					}
 					t.Fatal(err)
 				}
 			case string:
-				if err := ioutil.WriteFile(fullpath, []byte(value), 0644); err != nil {
+				if err := os.WriteFile(fullpath, []byte(value), 0644); err != nil {
 					t.Fatal(err)
 				}
 			default:
@@ -278,7 +277,7 @@ func Export(t testing.TB, exporter Exporter, modules []Module) *Exported {
 // It is intended for source files that are shell scripts.
 func Script(contents string) Writer {
 	return func(filename string) error {
-		return ioutil.WriteFile(filename, []byte(contents), 0755)
+		return os.WriteFile(filename, []byte(contents), 0755)
 	}
 }
 
@@ -340,7 +339,7 @@ func Symlink(source string) Writer {
 			mode := os.ModePerm
 			if err == nil {
 				mode = stat.Mode()
-			} else if !xerrors.Is(err, os.ErrNotExist) {
+			} else if !errors.Is(err, os.ErrNotExist) {
 				// We couldn't open the source, but it might exist. We don't expect to be
 				// able to portably create a symlink to a file we can't see.
 				return symlinkErr
@@ -452,17 +451,19 @@ func copyFile(dest, source string, perm os.FileMode) error {
 
 // GroupFilesByModules attempts to map directories to the modules within each directory.
 // This function assumes that the folder is structured in the following way:
-// - dir
-//   - primarymod
-//     - .go files
-//		 - packages
-//		 - go.mod (optional)
-//	 - modules
-// 		 - repoa
-//		   - mod1
-//	       - .go files
-//			   -  packages
-//		  	 - go.mod (optional)
+//
+//	dir/
+//		primarymod/
+//			*.go files
+//			packages
+//			go.mod (optional)
+//		modules/
+//			repoa/
+//				mod1/
+//					*.go files
+//					packages
+//					go.mod (optional)
+//
 // It scans the directory tree anchored at root and adds a Copy writer to the
 // map for every file found.
 // This is to enable the common case in tests where you have a full copy of the
@@ -582,7 +583,7 @@ func GroupFilesByModules(root string) ([]Module, error) {
 
 // MustCopyFileTree returns a file set for a module based on a real directory tree.
 // It scans the directory tree anchored at root and adds a Copy writer to the
-// map for every file found.
+// map for every file found. It skips copying files in nested modules.
 // This is to enable the common case in tests where you have a full copy of the
 // package in your testdata.
 // This will panic if there is any kind of error trying to walk the file tree.
@@ -593,6 +594,12 @@ func MustCopyFileTree(root string) map[string]interface{} {
 			return err
 		}
 		if info.IsDir() {
+			// skip nested modules.
+			if path != root {
+				if fi, err := os.Stat(filepath.Join(path, "go.mod")); err == nil && !fi.IsDir() {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		fragment, err := filepath.Rel(root, path)
@@ -651,7 +658,7 @@ func (e *Exported) FileContents(filename string) ([]byte, error) {
 	if content, found := e.Config.Overlay[filename]; found {
 		return content, nil
 	}
-	content, err := ioutil.ReadFile(filename)
+	content, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}

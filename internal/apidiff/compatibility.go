@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"go/types"
 	"reflect"
+
+	"golang.org/x/tools/internal/typesinternal"
 )
 
 func (d *differ) checkCompatible(otn *types.TypeName, old, new types.Type) {
+	old = types.Unalias(old)
+	new = types.Unalias(new)
 	switch old := old.(type) {
 	case *types.Interface:
 		if new, ok := new.(*types.Interface); ok {
@@ -138,13 +142,13 @@ func unexportedMethod(t *types.Interface) *types.Func {
 }
 
 // We need to check three things for structs:
-// 1. The set of exported fields must be compatible. This ensures that keyed struct
-//    literals continue to compile. (There is no compatibility guarantee for unkeyed
-//    struct literals.)
-// 2. The set of exported *selectable* fields must be compatible. This includes the exported
-//    fields of all embedded structs. This ensures that selections continue to compile.
-// 3. If the old struct is comparable, so must the new one be. This ensures that equality
-//    expressions and uses of struct values as map keys continue to compile.
+//  1. The set of exported fields must be compatible. This ensures that keyed struct
+//     literals continue to compile. (There is no compatibility guarantee for unkeyed
+//     struct literals.)
+//  2. The set of exported *selectable* fields must be compatible. This includes the exported
+//     fields of all embedded structs. This ensures that selections continue to compile.
+//  3. If the old struct is comparable, so must the new one be. This ensures that equality
+//     expressions and uses of struct values as map keys continue to compile.
 //
 // An unexported embedded struct can't appear in a struct literal outside the
 // package, so it doesn't have to be present, or have the same name, in the new
@@ -268,7 +272,7 @@ func (d *differ) checkCompatibleDefined(otn *types.TypeName, old *types.Named, n
 		return
 	}
 	// Interface method sets are checked in checkCompatibleInterface.
-	if _, ok := old.Underlying().(*types.Interface); ok {
+	if types.IsInterface(old) {
 		return
 	}
 
@@ -287,7 +291,7 @@ func (d *differ) checkMethodSet(otn *types.TypeName, oldt, newt types.Type, addc
 	oldMethodSet := exportedMethods(oldt)
 	newMethodSet := exportedMethods(newt)
 	msname := otn.Name()
-	if _, ok := oldt.(*types.Pointer); ok {
+	if _, ok := types.Unalias(oldt).(*types.Pointer); ok {
 		msname = "*" + msname
 	}
 	for name, oldMethod := range oldMethodSet {
@@ -301,7 +305,8 @@ func (d *differ) checkMethodSet(otn *types.TypeName, oldt, newt types.Type, addc
 			// T and one for the embedded type U. We want both messages to appear,
 			// but the messageSet dedup logic will allow only one message for a given
 			// object. So use the part string to distinguish them.
-			if receiverNamedType(oldMethod).Obj() != otn {
+			recv := oldMethod.Type().(*types.Signature).Recv()
+			if _, named := typesinternal.ReceiverNamed(recv); named.Obj() != otn {
 				part = fmt.Sprintf(", method set of %s", msname)
 			}
 			d.incompatible(oldMethod, part, "removed")
@@ -332,11 +337,11 @@ func (d *differ) checkMethodSet(otn *types.TypeName, oldt, newt types.Type, addc
 }
 
 // exportedMethods collects all the exported methods of type's method set.
-func exportedMethods(t types.Type) map[string]types.Object {
-	m := map[string]types.Object{}
+func exportedMethods(t types.Type) map[string]*types.Func {
+	m := make(map[string]*types.Func)
 	ms := types.NewMethodSet(t)
 	for i := 0; i < ms.Len(); i++ {
-		obj := ms.At(i).Obj()
+		obj := ms.At(i).Obj().(*types.Func)
 		if obj.Exported() {
 			m[obj.Name()] = obj
 		}
@@ -344,22 +349,7 @@ func exportedMethods(t types.Type) map[string]types.Object {
 	return m
 }
 
-func receiverType(method types.Object) types.Type {
-	return method.Type().(*types.Signature).Recv().Type()
-}
-
-func receiverNamedType(method types.Object) *types.Named {
-	switch t := receiverType(method).(type) {
-	case *types.Pointer:
-		return t.Elem().(*types.Named)
-	case *types.Named:
-		return t
-	default:
-		panic("unreachable")
-	}
-}
-
-func hasPointerReceiver(method types.Object) bool {
-	_, ok := receiverType(method).(*types.Pointer)
-	return ok
+func hasPointerReceiver(method *types.Func) bool {
+	isptr, _ := typesinternal.ReceiverNamed(method.Type().(*types.Signature).Recv())
+	return isptr
 }

@@ -11,7 +11,12 @@ import (
 	"golang.org/x/tools/go/analysis/passes/testinggoroutine"
 )
 
+func init() {
+	testinggoroutine.Analyzer.Flags.Set("subtest", "true")
+}
+
 func Test(t *testing.T) {
 	testdata := analysistest.TestData()
-	analysistest.Run(t, testdata, testinggoroutine.Analyzer, "a")
+	pkgs := []string{"a", "typeparams"}
+	analysistest.Run(t, testdata, testinggoroutine.Analyzer, pkgs...)
 }

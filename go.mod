@@ -1,12 +1,14 @@
 module golang.org/x/tools
 
-go 1.17
+go 1.22.0 // => default GODEBUG has gotypesalias=0
 
 require (
-	github.com/yuin/goldmark v1.3.5
-	golang.org/x/mod v0.4.2
-	golang.org/x/net v0.0.0-20210405180319-a5a99cb37ef4
-	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
-	golang.org/x/sys v0.0.0-20210510120138-977fb7262007
-	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1
+	github.com/google/go-cmp v0.6.0
+	github.com/yuin/goldmark v1.4.13
+	golang.org/x/mod v0.21.0
+	golang.org/x/net v0.29.0
+	golang.org/x/sync v0.8.0
+	golang.org/x/telemetry v0.0.0-20240521205824-bda55230c457
 )
+
+require golang.org/x/sys v0.25.0 // indirect

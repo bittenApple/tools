@@ -1,4 +1,7 @@
-# Semantic Tokens
+# Gopls: Semantic Tokens
+
+TODO(adonovan): this doc is internal, not for end users.
+Move it closer to the code in golang or protocol/semtok.
 
 The [LSP](https://microsoft.github.io/language-server-protocol/specifications/specification-3-17/#textDocument_semanticTokens)
 specifies semantic tokens as a way of telling clients about language-specific
@@ -16,7 +19,7 @@ don't make intuitive sense (although `async documentation` has a certain appeal)
 
 The 22 semantic tokens are `namespace`, `type`, `class`, `enum`, `interface`,
 		`struct`, `typeParameter`, `parameter`, `variable`, `property`, `enumMember`,
-		`event`, `function`, `member`, `macro`, `keyword`, `modifier`, `comment`,
+		`event`, `function`, `method`, `macro`, `keyword`, `modifier`, `comment`,
 		`string`, `number`, `regexp`, `operator`.
 
 The 10 modifiers are `declaration`, `definition`, `readonly`, `static`,
@@ -57,7 +60,7 @@ different runes by their Unicode language assignment, or some other Unicode prop
 being [confusable](http://www.unicode.org/Public/security/10.0.0/confusables.txt).
 
 Gopls does not come close to either of these principles.  Semantic tokens are returned for
-identifiers, keywords, operators, comments, and literals. (Sematic tokens do not
+identifiers, keywords, operators, comments, and literals. (Semantic tokens do not
 cover the file. They are not returned for
 white space or punctuation, and there is no semantic token for labels.)
 The following describes more precisely what gopls
@@ -69,10 +72,10 @@ The references to *object* refer to the
 1. __`keyword`__ All Go [keywords](https://golang.org/ref/spec#Keywords) are marked `keyword`.
 1. __`namespace`__ All package names are marked `namespace`. In an import, if there is an
 alias, it would be marked. Otherwise the last component of the import path is marked.
-1. __`type`__ Objects of type ```types.TypeName``` are marked `type`.
-If they are also ```types.Basic```
-the modifier is `defaultLibrary`. (And in ```type B struct{C}```, ```B``` has modifier `definition`.)
-1. __`parameter`__ The formal arguments in ```ast.FuncDecl``` nodes are marked `parameter`.
+1. __`type`__ Objects of type ```types.TypeName``` are marked `type`. It also reports
+a modifier for the top-level constructor of the object's type, one of:
+`interface`, `struct`, `signature`, `pointer`, `array`, `map`, `slice`, `chan`, `string`, `number`, `bool`, `invalid`.
+1. __`parameter`__ The formal arguments in ```ast.FuncDecl``` and ```ast.FuncType``` nodes are marked `parameter`.
 1. __`variable`__  Identifiers in the
 scope of ```const``` are modified with `readonly`. ```nil``` is usually a `variable` modified with both
 `readonly` and `defaultLibrary`. (```nil``` is a predefined identifier; the user can redefine it,
@@ -80,8 +83,8 @@ in which case it would just be a variable, or whatever.) Identifiers of type ```
 not surprisingly, marked `variable`. Identifiers being defined (node ```ast.GenDecl```) are modified
 by `definition` and, if appropriate, `readonly`. Receivers (in method declarations) are
 `variable`.
-1. __`member`__ Members are marked at their definition (```func (x foo) bar() {}```) or declaration
-in an ```interface```. Members are not marked where they are used.
+1. __`method`__ Methods are marked at their definition (```func (x foo) bar() {}```) or declaration
+in an ```interface```. Methods are not marked where they are used.
 In ```x.bar()```, ```x``` will be marked
 either as a `namespace` if it is a package name, or as a `variable` if it is an interface value,
 so distinguishing ```bar``` seemed superfluous.

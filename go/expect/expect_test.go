@@ -7,7 +7,7 @@ package expect_test
 import (
 	"bytes"
 	"go/token"
-	"io/ioutil"
+	"os"
 	"testing"
 
 	"golang.org/x/tools/go/expect"
@@ -43,16 +43,24 @@ func TestMarker(t *testing.T) {
 			},
 		},
 		{
-			filename:    "testdata/go.mod",
+			filename:    "testdata/go.fake.mod",
 			expectNotes: 2,
 			expectMarkers: map[string]string{
 				"αMarker": "αfake1α",
 				"βMarker": "require golang.org/modfile v0.0.0",
 			},
 		},
+		{
+			filename:    "testdata/go.fake.work",
+			expectNotes: 2,
+			expectMarkers: map[string]string{
+				"αMarker": "1.23.0",
+				"βMarker": "αβ",
+			},
+		},
 	} {
 		t.Run(tt.filename, func(t *testing.T) {
-			content, err := ioutil.ReadFile(tt.filename)
+			content, err := os.ReadFile(tt.filename)
 			if err != nil {
 				t.Fatal(err)
 			}

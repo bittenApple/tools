@@ -54,7 +54,7 @@ func f2(ptr *[3]int, i interface{}) {
 	}
 }
 
-func g() error
+func g() error { return nil }
 
 func f3() error {
 	err := g()
@@ -130,7 +130,6 @@ func f9(x interface {
 	b()
 	c()
 }) {
-
 	x.b() // we don't catch this panic because we don't have any facts yet
 	xx := interface {
 		a()
@@ -155,6 +154,152 @@ func f9(x interface {
 	}
 }
 
+func f10() {
+	s0 := make([]string, 0)
+	if s0 == nil { // want "impossible condition: non-nil == nil"
+		print(0)
+	}
+
+	var s1 []string
+	if s1 == nil { // want "tautological condition: nil == nil"
+		print(0)
+	}
+	s2 := s1[:][:]
+	if s2 == nil { // want "tautological condition: nil == nil"
+		print(0)
+	}
+}
+
 func unknown() bool {
 	return false
+}
+
+func f11(a interface{}) {
+	switch a.(type) {
+	case nil:
+		return
+	}
+	switch a.(type) {
+	case nil: // want "impossible condition: non-nil == nil"
+		return
+	}
+}
+
+func f12(a interface{}) {
+	switch a {
+	case nil:
+		return
+	}
+	switch a {
+	case 5,
+		nil: // want "impossible condition: non-nil == nil"
+		return
+	}
+}
+
+type Y struct {
+	innerY
+}
+
+type innerY struct {
+	value int
+}
+
+func f13() {
+	var d *Y
+	print(d.value) // want "nil dereference in field selection"
+}
+
+func f14() {
+	var x struct{ f string }
+	if x == struct{ f string }{} { // we don't catch this tautology as we restrict to reference types
+		print(x)
+	}
+}
+
+func f15(x any) {
+	ptr, ok := x.(*int)
+	if ok {
+		return
+	}
+	println(*ptr) // want "nil dereference in load"
+}
+
+func f16(x any) {
+	ptr, ok := x.(*int)
+	if !ok {
+		println(*ptr) // want "nil dereference in load"
+		return
+	}
+	println(*ptr)
+}
+
+func f18(x any) {
+	ptr, ok := x.(*int)
+	if ok {
+		println(ptr)
+		// falls through
+	}
+	println(*ptr)
+}
+
+// Regression test for https://github.com/golang/go/issues/65674:
+// spurious "nil deference in slice index operation" when the
+// index was subject to a range loop.
+func f19(slice []int, array *[2]int, m map[string]int, ch chan int) {
+	if slice == nil {
+		// A range over a nil slice is dynamically benign,
+		// but still signifies a programmer mistake.
+		//
+		// Since SSA has melted down the control structure,
+		// so we can only report a diagnostic about the
+		// index operation, with heuristics for "range".
+
+		for range slice { // nothing to report here
+		}
+		for _, v := range slice { // want "range of nil slice"
+			_ = v
+		}
+		for i := range slice {
+			_ = slice[i] // want "range of nil slice"
+		}
+		{
+			var i int
+			for i = range slice {
+			}
+			_ = slice[i] // want "index of nil slice"
+		}
+		for i := range slice {
+			if i < len(slice) {
+				_ = slice[i] // want "range of nil slice"
+			}
+		}
+		if len(slice) > 3 {
+			_ = slice[2] // want "index of nil slice"
+		}
+		for i := 0; i < len(slice); i++ {
+			_ = slice[i] // want "index of nil slice"
+		}
+	}
+
+	if array == nil {
+		// (The v var is necessary, otherwise the SSA
+		// code doesn't dereference the pointer.)
+		for _, v := range array { // want "nil dereference in array index operation"
+			_ = v
+		}
+	}
+
+	if m == nil {
+		for range m { // want "range over nil map"
+		}
+		m["one"] = 1 // want "nil dereference in map update"
+	}
+
+	if ch == nil {
+		for range ch { // want "receive from nil channel"
+		}
+		<-ch    // want "receive from nil channel"
+		ch <- 0 // want "send to nil channel"
+	}
 }

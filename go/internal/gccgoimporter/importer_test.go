@@ -10,11 +10,11 @@ package gccgoimporter
 
 import (
 	"go/types"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"testing"
 )
@@ -133,10 +133,19 @@ func TestObjImporter(t *testing.T) {
 	if gpath == "" {
 		t.Skip("This test needs gccgo")
 	}
+	if runtime.GOOS == "aix" {
+		// We don't yet have a debug/xcoff package for reading
+		// object files on AIX. Remove this skip if/when issue #29038
+		// is implemented (see also issue #49445).
+		t.Skip("no support yet for debug/xcoff")
+	}
 
-	verout, err := exec.Command(gpath, "--version").CombinedOutput()
+	verout, err := exec.Command(gpath, "--version").Output()
 	if err != nil {
 		t.Logf("%s", verout)
+		if exit, ok := err.(*exec.ExitError); ok && len(exit.Stderr) > 0 {
+			t.Logf("stderr:\n%s", exit.Stderr)
+		}
 		t.Fatal(err)
 	}
 	vers := regexp.MustCompile(`([0-9]+)\.([0-9]+)`).FindSubmatch(verout)
@@ -153,21 +162,11 @@ func TestObjImporter(t *testing.T) {
 	}
 	t.Logf("gccgo version %d.%d", major, minor)
 
-	tmpdir, err := ioutil.TempDir("", "TestObjImporter")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpdir)
-
+	tmpdir := t.TempDir()
 	initmap := make(map[*types.Package]InitData)
 	imp := GetImporter([]string{tmpdir}, initmap)
 
-	artmpdir, err := ioutil.TempDir("", "TestObjImporter")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(artmpdir)
-
+	artmpdir := t.TempDir()
 	arinitmap := make(map[*types.Package]InitData)
 	arimp := GetImporter([]string{artmpdir}, arinitmap)
 
@@ -186,8 +185,7 @@ func TestObjImporter(t *testing.T) {
 		afile := filepath.Join(artmpdir, "lib"+test.pkgpath+".a")
 
 		cmd := exec.Command(gpath, "-fgo-pkgpath="+test.pkgpath, "-c", "-o", ofile, gofile)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
+		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Logf("%s", out)
 			t.Fatalf("gccgo %s failed: %s", gofile, err)
 		}
@@ -195,8 +193,7 @@ func TestObjImporter(t *testing.T) {
 		runImporterTest(t, imp, initmap, &test)
 
 		cmd = exec.Command("ar", "cr", afile, ofile)
-		out, err = cmd.CombinedOutput()
-		if err != nil {
+		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Logf("%s", out)
 			t.Fatalf("ar cr %s %s failed: %s", afile, ofile, err)
 		}

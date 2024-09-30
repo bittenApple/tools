@@ -6,8 +6,8 @@ package jsonrpc2
 
 import (
 	"encoding/json"
-
-	errors "golang.org/x/xerrors"
+	"errors"
+	"fmt"
 )
 
 // ID is a Request identifier.
@@ -96,17 +96,17 @@ func (msg *Response) marshal(to *wireCombined) {
 	to.Result = msg.Result
 }
 
-func toWireError(err error) *wireError {
+func toWireError(err error) *WireError {
 	if err == nil {
 		// no error, the response is complete
 		return nil
 	}
-	if err, ok := err.(*wireError); ok {
+	if err, ok := err.(*WireError); ok {
 		// already a wire error, just use it
 		return err
 	}
-	result := &wireError{Message: err.Error()}
-	var wrapped *wireError
+	result := &WireError{Message: err.Error()}
+	var wrapped *WireError
 	if errors.As(err, &wrapped) {
 		// if we wrapped a wire error, keep the code from the wrapped error
 		// but the message from the outer error
@@ -120,7 +120,7 @@ func EncodeMessage(msg Message) ([]byte, error) {
 	msg.marshal(&wire)
 	data, err := json.Marshal(&wire)
 	if err != nil {
-		return data, errors.Errorf("marshaling jsonrpc message: %w", err)
+		return data, fmt.Errorf("marshaling jsonrpc message: %w", err)
 	}
 	return data, nil
 }
@@ -128,10 +128,10 @@ func EncodeMessage(msg Message) ([]byte, error) {
 func DecodeMessage(data []byte) (Message, error) {
 	msg := wireCombined{}
 	if err := json.Unmarshal(data, &msg); err != nil {
-		return nil, errors.Errorf("unmarshaling jsonrpc message: %w", err)
+		return nil, fmt.Errorf("unmarshaling jsonrpc message: %w", err)
 	}
 	if msg.VersionTag != wireVersion {
-		return nil, errors.Errorf("invalid message version tag %s expected %s", msg.VersionTag, wireVersion)
+		return nil, fmt.Errorf("invalid message version tag %s expected %s", msg.VersionTag, wireVersion)
 	}
 	id := ID{}
 	switch v := msg.ID.(type) {
@@ -144,7 +144,7 @@ func DecodeMessage(data []byte) (Message, error) {
 	case string:
 		id = StringID(v)
 	default:
-		return nil, errors.Errorf("invalid message id type <%T>%v", v, v)
+		return nil, fmt.Errorf("invalid message id type <%T>%v", v, v)
 	}
 	if msg.Method != "" {
 		// has a method, must be a call

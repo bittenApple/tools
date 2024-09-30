@@ -9,17 +9,20 @@ import (
 	"flag"
 	"fmt"
 	"go/build"
-	"io/ioutil"
 	"log"
+	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"golang.org/x/tools/go/packages/packagestest"
 	"golang.org/x/tools/internal/gocommand"
+	"golang.org/x/tools/internal/stdlib"
 )
 
 var testDebug = flag.Bool("debug", false, "enable debug output")
@@ -659,6 +662,37 @@ var _, _, _, _, _ = fmt.Errorf, io.Copy, strings.Contains, renamed_packagea.A, B
 `,
 	},
 
+	// Blank line can be added even when first import of group has comment with quote
+	{
+		name: "new_section_where_trailing_comment_has_quote",
+		in: `package main
+
+import (
+	"context"
+	bar "local.com/bar"
+	baz "local.com/baz"
+	buzz "local.com/buzz"
+	"github.com/golang/snappy" // this is a "typical" import
+)
+
+var _, _, _, _, _ = context.Background, bar.B, baz.B, buzz.B, snappy.ErrCorrupt
+`,
+		out: `package main
+
+import (
+	"context"
+
+	"github.com/golang/snappy" // this is a "typical" import
+
+	bar "local.com/bar"
+	baz "local.com/baz"
+	buzz "local.com/buzz"
+)
+
+var _, _, _, _, _ = context.Background, bar.B, baz.B, buzz.B, snappy.ErrCorrupt
+`,
+	},
+
 	// Non-idempotent comment formatting
 	// golang.org/issue/8035
 	{
@@ -1119,7 +1153,7 @@ var _ = rand.NewZipf
 `,
 		out: `package p
 
-import "math/rand"
+import "math/rand/v2"
 
 var _ = rand.NewZipf
 `,
@@ -1150,6 +1184,19 @@ var _, _ = rand.Read, rand.NewZipf
 import "math/rand"
 
 var _, _ = rand.Read, rand.NewZipf
+`,
+	},
+	{
+		name: "unused_duplicate_imports_remove",
+		in: `package main
+
+import (
+	"errors"
+
+	"github.com/pkg/errors"
+)
+`,
+		out: `package main
 `,
 	},
 }
@@ -1340,6 +1387,41 @@ var (
 	}.processTest(t, "golang.org/fake", "myotherpackage/toformat.go", nil, nil, want)
 }
 
+// Test support for packages in GOPATH whose files are symlinks.
+func TestImportSymlinkFiles(t *testing.T) {
+	const input = `package p
+
+var (
+	_ = fmt.Print
+	_ = mypkg.Foo
+)
+`
+	const want = `package p
+
+import (
+	"fmt"
+
+	"golang.org/fake/x/y/mypkg"
+)
+
+var (
+	_ = fmt.Print
+	_ = mypkg.Foo
+)
+`
+
+	testConfig{
+		module: packagestest.Module{
+			Name: "golang.org/fake",
+			Files: fm{
+				"target/f.go":                "package mypkg\nvar Foo = 123\n",
+				"x/y/mypkg/f.go":             packagestest.Symlink("../../../target/f.go"),
+				"myotherpackage/toformat.go": input,
+			},
+		},
+	}.processTest(t, "golang.org/fake", "myotherpackage/toformat.go", nil, nil, want)
+}
+
 func TestImportSymlinksWithIgnore(t *testing.T) {
 	const input = `package p
 
@@ -1367,7 +1449,8 @@ var (
 				"x/y/mypkg":              packagestest.Symlink("../../target"), // valid symlink
 				"x/y/apkg":               packagestest.Symlink(".."),           // symlink loop
 				"myotherpkg/toformat.go": input,
-				"../../.goimportsignore": "golang.org/fake/x/y/mypkg\n",
+				"../../.goimportsignore": "golang.org/fake/x/y/mypkg\n" +
+					"golang.org/fake/x/y/apkg\n",
 			},
 		},
 	}.processTest(t, "golang.org/fake", "myotherpkg/toformat.go", nil, nil, want)
@@ -1546,9 +1629,9 @@ import "bytes"
 var _ = bytes.Buffer
 `
 	// Force a scan of the stdlib.
-	savedStdlib := stdlib
-	defer func() { stdlib = savedStdlib }()
-	stdlib = map[string][]string{}
+	savedStdlib := stdlib.PackageSymbols
+	defer func() { stdlib.PackageSymbols = savedStdlib }()
+	stdlib.PackageSymbols = nil
 
 	testConfig{
 		module: packagestest.Module{
@@ -1669,7 +1752,7 @@ func (t *goimportTest) process(module, file string, contents []byte, opts *Optio
 func (t *goimportTest) processNonModule(file string, contents []byte, opts *Options) ([]byte, error) {
 	if contents == nil {
 		var err error
-		contents, err = ioutil.ReadFile(file)
+		contents, err = os.ReadFile(file)
 		if err != nil {
 			return nil, err
 		}
@@ -1688,7 +1771,7 @@ func (t *goimportTest) assertProcessEquals(module, file string, contents []byte,
 		t.Fatalf("Process() = %v", err)
 	}
 	if string(buf) != want {
-		t.Errorf("Got:\n%s\nWant:\n%s", buf, want)
+		t.Errorf("Got:\n'%s'\nWant:\n'%s'", buf, want) // 's show empty lines
 	}
 }
 
@@ -1715,8 +1798,100 @@ const Y = bar.X
 	}.processTest(t, "foo.com", "test/t.go", nil, nil, want)
 }
 
+func TestPanicAstutils(t *testing.T) {
+	t.Skip("panic in ast/astutil/imports.go, should be PostionFor(,false) at lines 273, 274, at least")
+	const input = `package main
+//line mah.go:600
+
+import (
+"foo.com/a.thing"
+"foo.com/surprise"
+"foo.com/v1"
+"foo.com/other/v2"
+"foo.com/other/v3"
+)
+`
+
+	const want = `package main
+
+//line mah.go:600
+
+import (
+	"foo.com/a.thing"
+	"foo.com/go-thing"
+	gow "foo.com/go-wrong"
+	v2 "foo.com/other/v2"
+	"foo.com/other/v3"
+	bar "foo.com/surprise"
+	v1 "foo.com/v1"
+)
+
+`
+
+	testConfig{
+		module: packagestest.Module{
+			Name: "foo.com",
+			Files: fm{
+				"test/t.go": input,
+			},
+		},
+	}.processTest(t, "foo.com", "test/t.go", nil, nil, want)
+}
+
+// without PositionFor in sortImports this test panics
+func TestPanic51916(t *testing.T) {
+	const input = `package main
+//line mah.go:600
+
+import (
+"foo.com/a.thing"
+"foo.com/surprise"
+"foo.com/v1"
+"foo.com/other/v2"
+"foo.com/other/v3"
+"foo.com/go-thing"
+"foo.com/go-wrong"
+)
+
+var _ = []interface{}{bar.X, v1.Y, a.A, v2.V2, other.V3, thing.Thing, gow.Wrong}`
+
+	const want = `package main
+
+//line mah.go:600
+
+import (
+	"foo.com/a.thing"
+	"foo.com/go-thing"
+	gow "foo.com/go-wrong"
+	v2 "foo.com/other/v2"
+	"foo.com/other/v3"
+	bar "foo.com/surprise"
+	v1 "foo.com/v1"
+)
+
+var _ = []interface{}{bar.X, v1.Y, a.A, v2.V2, other.V3, thing.Thing, gow.Wrong}
+`
+
+	testConfig{
+		module: packagestest.Module{
+			Name: "foo.com",
+			Files: fm{
+				"a.thing/a.go":  "package a \n const A = 1",
+				"surprise/x.go": "package bar \n const X = 1",
+				"v1/x.go":       "package v1 \n const Y = 1",
+				"other/v2/y.go": "package v2 \n const V2 = 1",
+				"other/v3/z.go": "package other \n const V3 = 1",
+				"go-thing/b.go": "package thing \n const Thing = 1",
+				"go-wrong/b.go": "package gow \n const Wrong = 1",
+				"test/t.go":     input,
+			},
+		},
+	}.processTest(t, "foo.com", "test/t.go", nil, nil, want)
+}
+
 // Tests that an existing import with badly mismatched path/name has its name
 // correctly added. See #28645 and #29041.
+// and check that //line directives are ignored (#51916)
 func TestAddNameToMismatchedImport(t *testing.T) {
 	const input = `package main
 
@@ -2682,8 +2857,8 @@ func TestGetPackageCompletions(t *testing.T) {
 			defer mu.Unlock()
 			for _, csym := range c.Exports {
 				for _, w := range want {
-					if c.Fix.StmtInfo.ImportPath == w.path && csym == w.symbol {
-						got = append(got, res{c.Fix.Relevance, c.Fix.IdentName, c.Fix.StmtInfo.ImportPath, csym})
+					if c.Fix.StmtInfo.ImportPath == w.path && csym.Name == w.symbol {
+						got = append(got, res{c.Fix.Relevance, c.Fix.IdentName, c.Fix.StmtInfo.ImportPath, csym.Name})
 					}
 				}
 			}
@@ -2781,4 +2956,132 @@ var _, _ = fmt.Sprintf, dot.Dot
 		},
 		gopathOnly: true, // our modules testing setup doesn't allow modules without dots.
 	}.processTest(t, "golang.org/fake", "x.go", nil, nil, want)
+}
+
+func TestSymbolSearchStarvation(t *testing.T) {
+	// This test verifies the fix for golang/go#67923: searching through
+	// candidates should not starve when the context is cancelled.
+	//
+	// To reproduce the conditions that led to starvation, cancel the context
+	// half way through the search, by leveraging the loadExports callback.
+	const candCount = 100
+	var loaded atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	searcher := symbolSearcher{
+		logf:   t.Logf,
+		srcDir: "/path/to/foo",
+		loadExports: func(ctx context.Context, pkg *pkg, includeTest bool) (string, []stdlib.Symbol, error) {
+			if loaded.Add(1) > candCount/2 {
+				cancel()
+			}
+			return "bar", []stdlib.Symbol{
+				{Name: "A", Kind: stdlib.Var},
+				{Name: "B", Kind: stdlib.Var},
+				// Missing: "C", so that none of these packages match.
+			}, nil
+		},
+	}
+
+	var candidates []pkgDistance
+	for i := 0; i < candCount; i++ {
+		name := fmt.Sprintf("bar%d", i)
+		candidates = append(candidates, pkgDistance{
+			pkg: &pkg{
+				dir:             path.Join(searcher.srcDir, name),
+				importPathShort: "foo/" + name,
+				packageName:     name,
+				relevance:       1,
+			},
+			distance: 1,
+		})
+	}
+
+	// We don't actually care what happens, as long as it doesn't deadlock!
+	_, err := searcher.search(ctx, candidates, "bar", map[string]bool{"A": true, "B": true, "C": true})
+	t.Logf("search completed with err: %v", err)
+}
+
+func TestMatchesPath(t *testing.T) {
+	tests := []struct {
+		ident string
+		path  string
+		want  bool
+	}{
+		// degenerate cases
+		{"", "", true},
+		{"", "x", false},
+		{"x", "", false},
+
+		// full segment matching
+		{"x", "x", true},
+		{"x", "y", false},
+		{"x", "wx", false},
+		{"x", "path/to/x", true},
+		{"mypkg", "path/to/mypkg", true},
+		{"x", "path/to/xy", false},
+		{"x", "path/to/x/y", true},
+		{"mypkg", "path/to/mypkg/y", true},
+		{"x", "path/to/x/v3", true},
+
+		// subsegment matching
+		{"x", "path/to/x-go", true},
+		{"foo", "path/to/go-foo", true},
+		{"go", "path/to/go-foo", true},
+		{"gofoo", "path/to/go-foo", true},
+		{"gofoo", "path/to/go-foo-bar", false},
+		{"foo", "path/to/go-foo-bar", true},
+		{"bar", "path/to/go-foo-bar", true},
+		{"gofoobar", "path/to/go-foo-bar", true},
+		{"x", "path/to/x.v3", true},
+		{"x", "path/to/xy.v3", false},
+		{"x", "path/to/wx.v3", false},
+
+		// case insensitivity
+		{"MyPkg", "path/to/mypkg", true},
+		{"myPkg", "path/to/MyPkg", true},
+
+		// multi-byte runes
+		{"世界", "path/to/世界", true},
+		{"世界", "path/to/世界/foo", true},
+		{"世界", "path/to/go-世界/foo", true},
+		{"世界", "path/to/世/foo", false},
+	}
+
+	for _, test := range tests {
+		if got := matchesPath(test.ident, test.path); got != test.want {
+			t.Errorf("matchesPath(%q, %q) = %v, want %v", test.ident, test.path, got, test.want)
+		}
+	}
+}
+
+func BenchmarkMatchesPath(b *testing.B) {
+	// A collection of calls that exercise different kinds of matching.
+	tests := map[string][]struct {
+		ident string
+		path  string
+		want  bool
+	}{
+		"easy": { // lower case ascii
+			{"mypkg", "path/to/mypkg/y", true},
+			{"foo", "path/to/go-foo-bar", true},
+			{"gofoo", "path/to/go-foo-bar-baz", false},
+		},
+		"hard": {
+			{"MyPkg", "path/to/mypkg", true},
+			{"世界", "path/to/go-世界-pkg/foo", true},
+			{"longpkgname", "cloud.google.com/Go/Spanner/Admin/Database/longpkgname", true},
+		},
+	}
+
+	for name, tests := range tests {
+		b.Run(name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				for _, test := range tests {
+					if got := matchesPath(test.ident, test.path); got != test.want {
+						b.Errorf("matchesPath(%q, %q) = %v, want %v", test.ident, test.path, got, test.want)
+					}
+				}
+			}
+		})
+	}
 }

@@ -20,6 +20,8 @@ import (
 	"strings"
 	"text/scanner"
 	"unicode/utf8"
+
+	"golang.org/x/tools/internal/typesinternal"
 )
 
 type parser struct {
@@ -127,8 +129,10 @@ func (p *parser) parseString() string {
 	return str
 }
 
-// unquotedString     = { unquotedStringChar } .
-// unquotedStringChar = <neither a whitespace nor a ';' char> .
+// parseUnquotedString parses an UnquotedString:
+//
+//	unquotedString     = { unquotedStringChar } .
+//	unquotedStringChar = <neither a whitespace nor a ';' char> .
 func (p *parser) parseUnquotedString() string {
 	if p.tok == scanner.EOF {
 		p.error("unexpected EOF")
@@ -163,7 +167,10 @@ func (p *parser) parseUnquotedQualifiedName() (path, name string) {
 	return p.parseQualifiedNameStr(p.parseUnquotedString())
 }
 
-// qualifiedName = [ ["."] unquotedString "." ] unquotedString .
+// parseQualifiedNameStr is given the leading name (unquoted by the caller if necessary)
+// and then parses the remainder of a qualified name:
+//
+//	qualifiedName = [ ["."] unquotedString "." ] unquotedString .
 //
 // The above production uses greedy matching.
 func (p *parser) parseQualifiedNameStr(unquotedName string) (pkgpath, name string) {
@@ -191,7 +198,6 @@ func (p *parser) parseQualifiedNameStr(unquotedName string) (pkgpath, name strin
 // getPkg returns the package for a given path. If the package is
 // not found but we have a package name, create the package and
 // add it to the p.imports map.
-//
 func (p *parser) getPkg(pkgpath, name string) *types.Package {
 	// package unsafe is not in the imports map - handle explicitly
 	if pkgpath == "unsafe" {
@@ -208,7 +214,7 @@ func (p *parser) getPkg(pkgpath, name string) *types.Package {
 // parseExportedName is like parseQualifiedName, but
 // the package path is resolved to an imported *types.Package.
 //
-// ExportedName = string [string] .
+//	ExportedName = string [string] .
 func (p *parser) parseExportedName() (pkg *types.Package, name string) {
 	path, name := p.parseQualifiedName()
 	var pkgname string
@@ -222,7 +228,9 @@ func (p *parser) parseExportedName() (pkg *types.Package, name string) {
 	return
 }
 
-// Name = QualifiedName | "?" .
+// parseName parses a Name:
+//
+//	Name = QualifiedName | "?" .
 func (p *parser) parseName() string {
 	if p.tok == '?' {
 		// Anonymous.
@@ -234,14 +242,9 @@ func (p *parser) parseName() string {
 	return name
 }
 
-func deref(typ types.Type) types.Type {
-	if p, _ := typ.(*types.Pointer); p != nil {
-		typ = p.Elem()
-	}
-	return typ
-}
-
-// Field = Name Type [string] .
+// parseField parses a Field:
+//
+//	Field = Name Type [string] .
 func (p *parser) parseField(pkg *types.Package) (field *types.Var, tag string) {
 	name := p.parseName()
 	typ, n := p.parseTypeExtended(pkg)
@@ -252,7 +255,7 @@ func (p *parser) parseField(pkg *types.Package) (field *types.Var, tag string) {
 		if aname, ok := p.aliases[n]; ok {
 			name = aname
 		} else {
-			switch typ := deref(typ).(type) {
+			switch typ := types.Unalias(typesinternal.Unpointer(typ)).(type) {
 			case *types.Basic:
 				name = typ.Name()
 			case *types.Named:
@@ -269,7 +272,9 @@ func (p *parser) parseField(pkg *types.Package) (field *types.Var, tag string) {
 	return
 }
 
-// Param = Name ["..."] Type .
+// parseParam parses a Param:
+//
+//	Param = Name ["..."] Type .
 func (p *parser) parseParam(pkg *types.Package) (param *types.Var, isVariadic bool) {
 	name := p.parseName()
 	// Ignore names invented for inlinable functions.
@@ -298,7 +303,9 @@ func (p *parser) parseParam(pkg *types.Package) (param *types.Var, isVariadic bo
 	return
 }
 
-// Var = Name Type .
+// parseVar parses a Var:
+//
+//	Var = Name Type .
 func (p *parser) parseVar(pkg *types.Package) *types.Var {
 	name := p.parseName()
 	v := types.NewVar(token.NoPos, pkg, name, p.parseType(pkg))
@@ -311,7 +318,9 @@ func (p *parser) parseVar(pkg *types.Package) *types.Var {
 	return v
 }
 
-// Conversion = "convert" "(" Type "," ConstValue ")" .
+// parseConversion parses a Conversion:
+//
+//	Conversion = "convert" "(" Type "," ConstValue ")" .
 func (p *parser) parseConversion(pkg *types.Package) (val constant.Value, typ types.Type) {
 	p.expectKeyword("convert")
 	p.expect('(')
@@ -322,8 +331,10 @@ func (p *parser) parseConversion(pkg *types.Package) (val constant.Value, typ ty
 	return
 }
 
-// ConstValue     = string | "false" | "true" | ["-"] (int ["'"] | FloatOrComplex) | Conversion .
-// FloatOrComplex = float ["i" | ("+"|"-") float "i"] .
+// parseConstValue parses a ConstValue:
+//
+//	ConstValue     = string | "false" | "true" | ["-"] (int ["'"] | FloatOrComplex) | Conversion .
+//	FloatOrComplex = float ["i" | ("+"|"-") float "i"] .
 func (p *parser) parseConstValue(pkg *types.Package) (val constant.Value, typ types.Type) {
 	// v3 changed to $false, $true, $convert, to avoid confusion
 	// with variable names in inline function bodies.
@@ -429,7 +440,9 @@ func (p *parser) parseConstValue(pkg *types.Package) (val constant.Value, typ ty
 	return
 }
 
-// Const = Name [Type] "=" ConstValue .
+// parseConst parses a Const:
+//
+//	Const = Name [Type] "=" ConstValue .
 func (p *parser) parseConst(pkg *types.Package) *types.Const {
 	name := p.parseName()
 	var typ types.Type
@@ -510,9 +523,11 @@ func (p *parser) update(t types.Type, nlist []interface{}) {
 	}
 }
 
-// NamedType = TypeName [ "=" ] Type { Method } .
-// TypeName  = ExportedName .
-// Method    = "func" "(" Param ")" Name ParamList ResultList [InlineBody] ";" .
+// parseNamedType parses a NamedType:
+//
+//	NamedType = TypeName [ "=" ] Type { Method } .
+//	TypeName  = ExportedName .
+//	Method    = "func" "(" Param ")" Name ParamList ResultList [InlineBody] ";" .
 func (p *parser) parseNamedType(nlist []interface{}) types.Type {
 	pkg, name := p.parseExportedName()
 	scope := pkg.Scope()
@@ -559,7 +574,7 @@ func (p *parser) parseNamedType(nlist []interface{}) types.Type {
 	t := obj.Type()
 	p.update(t, nlist)
 
-	nt, ok := t.(*types.Named)
+	nt, ok := types.Unalias(t).(*types.Named)
 	if !ok {
 		// This can happen for unsafe.Pointer, which is a TypeName holding a Basic type.
 		pt := p.parseType(pkg)
@@ -629,7 +644,9 @@ func (p *parser) parseInt() int {
 	return int(n)
 }
 
-// ArrayOrSliceType = "[" [ int ] "]" Type .
+// parseArrayOrSliceType parses an ArrayOrSliceType:
+//
+//	ArrayOrSliceType = "[" [ int ] "]" Type .
 func (p *parser) parseArrayOrSliceType(pkg *types.Package, nlist []interface{}) types.Type {
 	p.expect('[')
 	if p.tok == ']' {
@@ -652,7 +669,9 @@ func (p *parser) parseArrayOrSliceType(pkg *types.Package, nlist []interface{}) 
 	return t
 }
 
-// MapType = "map" "[" Type "]" Type .
+// parseMapType parses a MapType:
+//
+//	MapType = "map" "[" Type "]" Type .
 func (p *parser) parseMapType(pkg *types.Package, nlist []interface{}) types.Type {
 	p.expectKeyword("map")
 
@@ -668,7 +687,9 @@ func (p *parser) parseMapType(pkg *types.Package, nlist []interface{}) types.Typ
 	return t
 }
 
-// ChanType = "chan" ["<-" | "-<"] Type .
+// parseChanType parses a ChanType:
+//
+//	ChanType = "chan" ["<-" | "-<"] Type .
 func (p *parser) parseChanType(pkg *types.Package, nlist []interface{}) types.Type {
 	p.expectKeyword("chan")
 
@@ -695,7 +716,9 @@ func (p *parser) parseChanType(pkg *types.Package, nlist []interface{}) types.Ty
 	return t
 }
 
-// StructType = "struct" "{" { Field } "}" .
+// parseStructType parses a StructType:
+//
+//	StructType = "struct" "{" { Field } "}" .
 func (p *parser) parseStructType(pkg *types.Package, nlist []interface{}) types.Type {
 	p.expectKeyword("struct")
 
@@ -718,7 +741,9 @@ func (p *parser) parseStructType(pkg *types.Package, nlist []interface{}) types.
 	return t
 }
 
-// ParamList = "(" [ { Parameter "," } Parameter ] ")" .
+// parseParamList parses a ParamList:
+//
+//	ParamList = "(" [ { Parameter "," } Parameter ] ")" .
 func (p *parser) parseParamList(pkg *types.Package) (*types.Tuple, bool) {
 	var list []*types.Var
 	isVariadic := false
@@ -742,7 +767,9 @@ func (p *parser) parseParamList(pkg *types.Package) (*types.Tuple, bool) {
 	return types.NewTuple(list...), isVariadic
 }
 
-// ResultList = Type | ParamList .
+// parseResultList parses a ResultList:
+//
+//	ResultList = Type | ParamList .
 func (p *parser) parseResultList(pkg *types.Package) *types.Tuple {
 	switch p.tok {
 	case '<':
@@ -762,7 +789,9 @@ func (p *parser) parseResultList(pkg *types.Package) *types.Tuple {
 	}
 }
 
-// FunctionType = ParamList ResultList .
+// parseFunctionType parses a FunctionType:
+//
+//	FunctionType = ParamList ResultList .
 func (p *parser) parseFunctionType(pkg *types.Package, nlist []interface{}) *types.Signature {
 	t := new(types.Signature)
 	p.update(t, nlist)
@@ -774,7 +803,9 @@ func (p *parser) parseFunctionType(pkg *types.Package, nlist []interface{}) *typ
 	return t
 }
 
-// Func = Name FunctionType [InlineBody] .
+// parseFunc parses a Func:
+//
+//	Func = Name FunctionType [InlineBody] .
 func (p *parser) parseFunc(pkg *types.Package) *types.Func {
 	if p.tok == '/' {
 		// Skip an /*asm ID */ comment.
@@ -802,7 +833,9 @@ func (p *parser) parseFunc(pkg *types.Package) *types.Func {
 	return f
 }
 
-// InterfaceType = "interface" "{" { ("?" Type | Func) ";" } "}" .
+// parseInterfaceType parses an InterfaceType:
+//
+//	InterfaceType = "interface" "{" { ("?" Type | Func) ";" } "}" .
 func (p *parser) parseInterfaceType(pkg *types.Package, nlist []interface{}) types.Type {
 	p.expectKeyword("interface")
 
@@ -831,7 +864,9 @@ func (p *parser) parseInterfaceType(pkg *types.Package, nlist []interface{}) typ
 	return t
 }
 
-// PointerType = "*" ("any" | Type) .
+// parsePointerType parses a PointerType:
+//
+//	PointerType = "*" ("any" | Type) .
 func (p *parser) parsePointerType(pkg *types.Package, nlist []interface{}) types.Type {
 	p.expect('*')
 	if p.tok == scanner.Ident {
@@ -849,7 +884,9 @@ func (p *parser) parsePointerType(pkg *types.Package, nlist []interface{}) types
 	return t
 }
 
-// TypeSpec = NamedType | MapType | ChanType | StructType | InterfaceType | PointerType | ArrayOrSliceType | FunctionType .
+// parseTypeSpec parses a TypeSpec:
+//
+//	TypeSpec = NamedType | MapType | ChanType | StructType | InterfaceType | PointerType | ArrayOrSliceType | FunctionType .
 func (p *parser) parseTypeSpec(pkg *types.Package, nlist []interface{}) types.Type {
 	switch p.tok {
 	case scanner.String:
@@ -908,6 +945,7 @@ const (
 	gccgoBuiltinERROR      = 19
 	gccgoBuiltinBYTE       = 20
 	gccgoBuiltinRUNE       = 21
+	gccgoBuiltinANY        = 22
 )
 
 func lookupBuiltinType(typ int) types.Type {
@@ -932,13 +970,15 @@ func lookupBuiltinType(typ int) types.Type {
 		gccgoBuiltinERROR:      types.Universe.Lookup("error").Type(),
 		gccgoBuiltinBYTE:       types.Universe.Lookup("byte").Type(),
 		gccgoBuiltinRUNE:       types.Universe.Lookup("rune").Type(),
+		gccgoBuiltinANY:        types.Universe.Lookup("any").Type(),
 	}[typ]
 }
 
-// Type = "<" "type" ( "-" int | int [ TypeSpec ] ) ">" .
+// parseType parses a Type:
+//
+//	Type = "<" "type" ( "-" int | int [ TypeSpec ] ) ">" .
 //
 // parseType updates the type map to t for all type numbers n.
-//
 func (p *parser) parseType(pkg *types.Package, n ...interface{}) types.Type {
 	p.expect('<')
 	t, _ := p.parseTypeAfterAngle(pkg, n...)
@@ -1028,7 +1068,9 @@ func (p *parser) skipInlineBody() {
 	}
 }
 
-// Types = "types" maxp1 exportedp1 (offset length)* .
+// parseTypes parses a Types:
+//
+//	Types = "types" maxp1 exportedp1 (offset length)* .
 func (p *parser) parseTypes(pkg *types.Package) {
 	maxp1 := p.parseInt()
 	exportedp1 := p.parseInt()
@@ -1102,7 +1144,9 @@ func (p *parser) parseSavedType(pkg *types.Package, i int, nlist []interface{}) 
 	}
 }
 
-// PackageInit = unquotedString unquotedString int .
+// parsePackageInit parses a PackageInit:
+//
+//	PackageInit = unquotedString unquotedString int .
 func (p *parser) parsePackageInit() PackageInit {
 	name := p.parseUnquotedString()
 	initfunc := p.parseUnquotedString()
@@ -1120,10 +1164,12 @@ func (p *parser) maybeCreatePackage() {
 	}
 }
 
-// InitDataDirective = ( "v1" | "v2" | "v3" ) ";" |
-//                     "priority" int ";" |
-//                     "init" { PackageInit } ";" |
-//                     "checksum" unquotedString ";" .
+// parseInitDataDirective parses an InitDataDirective:
+//
+//	InitDataDirective = ( "v1" | "v2" | "v3" ) ";" |
+//		"priority" int ";" |
+//		"init" { PackageInit } ";" |
+//		"checksum" unquotedString ";" .
 func (p *parser) parseInitDataDirective() {
 	if p.tok != scanner.Ident {
 		// unexpected token kind; panic
@@ -1173,16 +1219,18 @@ func (p *parser) parseInitDataDirective() {
 	}
 }
 
-// Directive = InitDataDirective |
-//             "package" unquotedString [ unquotedString ] [ unquotedString ] ";" |
-//             "pkgpath" unquotedString ";" |
-//             "prefix" unquotedString ";" |
-//             "import" unquotedString unquotedString string ";" |
-//             "indirectimport" unquotedString unquotedstring ";" |
-//             "func" Func ";" |
-//             "type" Type ";" |
-//             "var" Var ";" |
-//             "const" Const ";" .
+// parseDirective parses a Directive:
+//
+//	Directive = InitDataDirective |
+//		"package" unquotedString [ unquotedString ] [ unquotedString ] ";" |
+//		"pkgpath" unquotedString ";" |
+//		"prefix" unquotedString ";" |
+//		"import" unquotedString unquotedString string ";" |
+//		"indirectimport" unquotedString unquotedstring ";" |
+//		"func" Func ";" |
+//		"type" Type ";" |
+//		"var" Var ";" |
+//		"const" Const ";" .
 func (p *parser) parseDirective() {
 	if p.tok != scanner.Ident {
 		// unexpected token kind; panic
@@ -1266,7 +1314,9 @@ func (p *parser) parseDirective() {
 	}
 }
 
-// Package = { Directive } .
+// parsePackage parses a Package:
+//
+//	Package = { Directive } .
 func (p *parser) parsePackage() *types.Package {
 	for p.tok != scanner.EOF {
 		p.parseDirective()
@@ -1279,7 +1329,7 @@ func (p *parser) parsePackage() *types.Package {
 	}
 	p.fixups = nil
 	for _, typ := range p.typeList {
-		if it, ok := typ.(*types.Interface); ok {
+		if it, ok := types.Unalias(typ).(*types.Interface); ok {
 			it.Complete()
 		}
 	}

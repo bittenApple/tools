@@ -13,7 +13,7 @@ import (
 
 func Test(t *testing.T) {
 	testdata := analysistest.TestData()
-	analysistest.Run(t, testdata, stdmethods.Analyzer, "a")
+	analysistest.Run(t, testdata, stdmethods.Analyzer, "a", "typeparams")
 }
 
 func TestAnalyzeEncodingXML(t *testing.T) {

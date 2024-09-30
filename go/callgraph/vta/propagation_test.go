@@ -58,7 +58,7 @@ func newLocal(name string, t types.Type) local {
 
 // newNamedType creates a bogus type named `name`.
 func newNamedType(name string) *types.Named {
-	return types.NewNamed(types.NewTypeName(token.NoPos, nil, name, nil), nil, nil)
+	return types.NewNamed(types.NewTypeName(token.NoPos, nil, name, nil), types.Universe.Lookup("int").Type(), nil)
 }
 
 // sccString is a utility for stringifying `nodeToScc`. Every
@@ -101,9 +101,10 @@ func nodeToTypeString(pMap propTypeMap) map[string]string {
 	nodeToTypeStr := make(map[string]string)
 	for node := range pMap.nodeToScc {
 		var propStrings []string
-		for prop := range pMap.propTypes(node) {
+		pMap.propTypes(node)(func(prop propType) bool {
 			propStrings = append(propStrings, propTypeString(prop))
-		}
+			return true
+		})
 		sort.Strings(propStrings)
 		nodeToTypeStr[node.String()] = strings.Join(propStrings, ";")
 	}
@@ -123,7 +124,8 @@ func sccEqual(sccs1 []string, sccs2 []string) bool {
 
 // isRevTopSorted checks if sccs of `g` are sorted in reverse
 // topological order:
-//  for every edge x -> y in g, nodeToScc[x] > nodeToScc[y]
+//
+//	for every edge x -> y in g, nodeToScc[x] > nodeToScc[y]
 func isRevTopSorted(g vtaGraph, nodeToScc map[node]int) bool {
 	for n, succs := range g {
 		for s := range succs {
@@ -148,39 +150,39 @@ func setName(f *ssa.Function, name string) {
 // parentheses contain node types and F nodes stand for function
 // nodes whose content is function named F:
 //
-//  no-cycles:
-//	t0 (A) -> t1 (B) -> t2 (C)
+//	 no-cycles:
+//		t0 (A) -> t1 (B) -> t2 (C)
 //
-//  trivial-cycle:
-//      <--------    <--------
-//      |       |    |       |
-//      t0 (A) ->    t1 (B) ->
+//	 trivial-cycle:
+//	     <--------    <--------
+//	     |       |    |       |
+//	     t0 (A) ->    t1 (B) ->
 //
-//  circle-cycle:
-//	t0 (A) -> t1 (A) -> t2 (B)
-//      |                   |
-//      <--------------------
+//	 circle-cycle:
+//		t0 (A) -> t1 (A) -> t2 (B)
+//	     |                   |
+//	     <--------------------
 //
-//  fully-connected:
-//	t0 (A) <-> t1 (B)
-//           \    /
-//            t2(C)
+//	 fully-connected:
+//		t0 (A) <-> t1 (B)
+//	          \    /
+//	           t2(C)
 //
-//  subsumed-scc:
-//	t0 (A) -> t1 (B) -> t2(B) -> t3 (A)
-//      |          |         |        |
-//      |          <---------         |
-//      <-----------------------------
+//	 subsumed-scc:
+//		t0 (A) -> t1 (B) -> t2(B) -> t3 (A)
+//	     |          |         |        |
+//	     |          <---------         |
+//	     <-----------------------------
 //
-//  more-realistic:
-//      <--------
-//      |        |
-//      t0 (A) -->
-//                            ---------->
-//                           |           |
-//      t1 (A) -> t2 (B) -> F1 -> F2 -> F3 -> F4
-//       |        |          |           |
-//        <-------           <------------
+//	 more-realistic:
+//	     <--------
+//	     |        |
+//	     t0 (A) -->
+//	                           ---------->
+//	                          |           |
+//	     t1 (A) -> t2 (B) -> F1 -> F2 -> F3 -> F4
+//	      |        |          |           |
+//	       <-------           <------------
 func testSuite() map[string]vtaGraph {
 	a := newNamedType("A")
 	b := newNamedType("B")
@@ -197,42 +199,42 @@ func testSuite() map[string]vtaGraph {
 	setName(f4, "F4")
 
 	graphs := make(map[string]vtaGraph)
-	graphs["no-cycles"] = map[node]map[node]bool{
-		newLocal("t0", a): {newLocal("t1", b): true},
-		newLocal("t1", b): {newLocal("t2", c): true},
+	graphs["no-cycles"] = map[node]map[node]empty{
+		newLocal("t0", a): {newLocal("t1", b): empty{}},
+		newLocal("t1", b): {newLocal("t2", c): empty{}},
 	}
 
-	graphs["trivial-cycle"] = map[node]map[node]bool{
-		newLocal("t0", a): {newLocal("t0", a): true},
-		newLocal("t1", b): {newLocal("t1", b): true},
+	graphs["trivial-cycle"] = map[node]map[node]empty{
+		newLocal("t0", a): {newLocal("t0", a): empty{}},
+		newLocal("t1", b): {newLocal("t1", b): empty{}},
 	}
 
-	graphs["circle-cycle"] = map[node]map[node]bool{
-		newLocal("t0", a): {newLocal("t1", a): true},
-		newLocal("t1", a): {newLocal("t2", b): true},
-		newLocal("t2", b): {newLocal("t0", a): true},
+	graphs["circle-cycle"] = map[node]map[node]empty{
+		newLocal("t0", a): {newLocal("t1", a): empty{}},
+		newLocal("t1", a): {newLocal("t2", b): empty{}},
+		newLocal("t2", b): {newLocal("t0", a): empty{}},
 	}
 
-	graphs["fully-connected"] = map[node]map[node]bool{
-		newLocal("t0", a): {newLocal("t1", b): true, newLocal("t2", c): true},
-		newLocal("t1", b): {newLocal("t0", a): true, newLocal("t2", c): true},
-		newLocal("t2", c): {newLocal("t0", a): true, newLocal("t1", b): true},
+	graphs["fully-connected"] = map[node]map[node]empty{
+		newLocal("t0", a): {newLocal("t1", b): empty{}, newLocal("t2", c): empty{}},
+		newLocal("t1", b): {newLocal("t0", a): empty{}, newLocal("t2", c): empty{}},
+		newLocal("t2", c): {newLocal("t0", a): empty{}, newLocal("t1", b): empty{}},
 	}
 
-	graphs["subsumed-scc"] = map[node]map[node]bool{
-		newLocal("t0", a): {newLocal("t1", b): true},
-		newLocal("t1", b): {newLocal("t2", b): true},
-		newLocal("t2", b): {newLocal("t1", b): true, newLocal("t3", a): true},
-		newLocal("t3", a): {newLocal("t0", a): true},
+	graphs["subsumed-scc"] = map[node]map[node]empty{
+		newLocal("t0", a): {newLocal("t1", b): empty{}},
+		newLocal("t1", b): {newLocal("t2", b): empty{}},
+		newLocal("t2", b): {newLocal("t1", b): empty{}, newLocal("t3", a): empty{}},
+		newLocal("t3", a): {newLocal("t0", a): empty{}},
 	}
 
-	graphs["more-realistic"] = map[node]map[node]bool{
-		newLocal("t0", a): {newLocal("t0", a): true},
-		newLocal("t1", a): {newLocal("t2", b): true},
-		newLocal("t2", b): {newLocal("t1", a): true, function{f1}: true},
-		function{f1}:      {function{f2}: true, function{f3}: true},
-		function{f2}:      {function{f3}: true},
-		function{f3}:      {function{f1}: true, function{f4}: true},
+	graphs["more-realistic"] = map[node]map[node]empty{
+		newLocal("t0", a): {newLocal("t0", a): empty{}},
+		newLocal("t1", a): {newLocal("t2", b): empty{}},
+		newLocal("t2", b): {newLocal("t1", a): empty{}, function{f1}: empty{}},
+		function{f1}:      {function{f2}: empty{}, function{f3}: empty{}},
+		function{f2}:      {function{f3}: empty{}},
+		function{f3}:      {function{f1}: empty{}, function{f4}: empty{}},
 	}
 
 	return graphs

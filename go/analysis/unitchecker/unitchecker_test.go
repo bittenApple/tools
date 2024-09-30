@@ -2,14 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build go1.12
-// +build go1.12
-
 package unitchecker_test
-
-// This test depends on features such as
-// go vet's support for vetx files (1.11) and
-// the (*os.ProcessState).ExitCode method (1.12).
 
 import (
 	"flag"
@@ -20,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/tools/go/analysis/passes/assign"
 	"golang.org/x/tools/go/analysis/passes/findcall"
 	"golang.org/x/tools/go/analysis/passes/printf"
 	"golang.org/x/tools/go/analysis/unitchecker"
@@ -27,20 +21,30 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	if os.Getenv("UNITCHECKER_CHILD") == "1" {
-		// child process
-		main()
+	// child process?
+	switch os.Getenv("ENTRYPOINT") {
+	case "vet":
+		vet()
+		panic("unreachable")
+	case "minivet":
+		minivet()
+		panic("unreachable")
+	case "worker":
+		worker() // see ExampleSeparateAnalysis
 		panic("unreachable")
 	}
 
+	// test process
 	flag.Parse()
 	os.Exit(m.Run())
 }
 
-func main() {
+// minivet is a vet-like tool with a few analyzers, for testing.
+func minivet() {
 	unitchecker.Main(
 		findcall.Analyzer,
 		printf.Analyzer,
+		assign.Analyzer,
 	)
 }
 
@@ -75,6 +79,13 @@ func _() {
 
 func MyFunc123() {}
 `,
+			"c/c.go": `package c
+
+func _() {
+    i := 5
+    i = i
+}
+`,
 		}}})
 	defer exported.Cleanup()
 
@@ -85,47 +96,100 @@ func MyFunc123() {}
 ([/._\-a-zA-Z0-9]+[\\/]fake[\\/])?b/b.go:6:13: call of MyFunc123\(...\)
 ([/._\-a-zA-Z0-9]+[\\/]fake[\\/])?b/b.go:7:11: call of MyFunc123\(...\)
 `
+	const wantC = `# golang.org/fake/c
+([/._\-a-zA-Z0-9]+[\\/]fake[\\/])?c/c.go:5:5: self-assignment of i to i
+`
 	const wantAJSON = `# golang.org/fake/a
 \{
 	"golang.org/fake/a": \{
 		"findcall": \[
 			\{
 				"posn": "([/._\-a-zA-Z0-9]+[\\/]fake[\\/])?a/a.go:4:11",
-				"message": "call of MyFunc123\(...\)"
+				"message": "call of MyFunc123\(...\)",
+				"suggested_fixes": \[
+					\{
+						"message": "Add '_TEST_'",
+						"edits": \[
+							\{
+								"filename": "([/._\-a-zA-Z0-9]+[\\/]fake[\\/])?a/a.go",
+								"start": 32,
+								"end": 32,
+								"new": "_TEST_"
+							\}
+						\]
+					\}
+				\]
 			\}
 		\]
 	\}
 \}
 `
-
+	const wantCJSON = `# golang.org/fake/c
+\{
+	"golang.org/fake/c": \{
+		"assign": \[
+			\{
+				"posn": "([/._\-a-zA-Z0-9]+[\\/]fake[\\/])?c/c.go:5:5",
+				"message": "self-assignment of i to i",
+				"suggested_fixes": \[
+					\{
+						"message": "Remove",
+						"edits": \[
+							\{
+								"filename": "([/._\-a-zA-Z0-9]+[\\/]fake[\\/])?c/c.go",
+								"start": 37,
+								"end": 42,
+								"new": ""
+							\}
+						\]
+					\}
+				\]
+			\}
+		\]
+	\}
+\}
+`
 	for _, test := range []struct {
-		args     string
-		wantOut  string
-		wantExit int
+		args          string
+		wantOut       string
+		wantExitError bool
 	}{
-		{args: "golang.org/fake/a", wantOut: wantA, wantExit: 2},
-		{args: "golang.org/fake/b", wantOut: wantB, wantExit: 2},
-		{args: "golang.org/fake/a golang.org/fake/b", wantOut: wantA + wantB, wantExit: 2},
-		{args: "-json golang.org/fake/a", wantOut: wantAJSON, wantExit: 0},
-		{args: "-c=0 golang.org/fake/a", wantOut: wantA + "4		MyFunc123\\(\\)\n", wantExit: 2},
+		{args: "golang.org/fake/a", wantOut: wantA, wantExitError: true},
+		{args: "golang.org/fake/b", wantOut: wantB, wantExitError: true},
+		{args: "golang.org/fake/c", wantOut: wantC, wantExitError: true},
+		{args: "golang.org/fake/a golang.org/fake/b", wantOut: wantA + wantB, wantExitError: true},
+		{args: "-json golang.org/fake/a", wantOut: wantAJSON, wantExitError: false},
+		{args: "-json golang.org/fake/c", wantOut: wantCJSON, wantExitError: false},
+		{args: "-c=0 golang.org/fake/a", wantOut: wantA + "4		MyFunc123\\(\\)\n", wantExitError: true},
 	} {
 		cmd := exec.Command("go", "vet", "-vettool="+os.Args[0], "-findcall.name=MyFunc123")
 		cmd.Args = append(cmd.Args, strings.Fields(test.args)...)
-		cmd.Env = append(exported.Config.Env, "UNITCHECKER_CHILD=1")
+		cmd.Env = append(exported.Config.Env, "ENTRYPOINT=minivet")
 		cmd.Dir = exported.Config.Dir
 
+		// TODO(golang/go#65729): this is unsound: any extra
+		// logging by the child process (e.g. due to GODEBUG
+		// options) will add noise to stderr, causing the
+		// CombinedOutput to be unparseable as JSON. But we
+		// can't simply use Output here as some of the tests
+		// look for substrings of stderr. Rework the test to
+		// be specific about which output stream to match.
 		out, err := cmd.CombinedOutput()
 		exitcode := 0
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitcode = exitErr.ExitCode()
 		}
-		if exitcode != test.wantExit {
-			t.Errorf("%s: got exit code %d, want %d", test.args, exitcode, test.wantExit)
+		if (exitcode != 0) != test.wantExitError {
+			want := "zero"
+			if test.wantExitError {
+				want = "nonzero"
+			}
+			t.Errorf("%s: got exit code %d, want %s", test.args, exitcode, want)
 		}
 
 		matched, err := regexp.Match(test.wantOut, out)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("regexp.Match(<<%s>>): %v", test.wantOut, err)
 		}
 		if !matched {
 			t.Errorf("%s: got <<%s>>, want match of regexp <<%s>>", test.args, out, test.wantOut)

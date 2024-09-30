@@ -14,9 +14,7 @@ import (
 
 func Test(t *testing.T) {
 	testdata := analysistest.TestData()
-
-	// load testdata/src/a/a.go
-	results := analysistest.Run(t, testdata, ctrlflow.Analyzer, "a")
+	results := analysistest.Run(t, testdata, ctrlflow.Analyzer, "a", "typeparams")
 
 	// Perform a minimal smoke test on
 	// the result (CFG) computed by ctrlflow.

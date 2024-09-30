@@ -2,6 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build !android && !ios && (unix || aix || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris || plan9 || windows)
+// +build !android
+// +build !ios
+// +build unix aix darwin dragonfly freebsd linux netbsd openbsd solaris plan9 windows
+
 package ssa_test
 
 import (
@@ -32,9 +37,10 @@ func main() {
 `
 
 // This program demonstrates how to run the SSA builder on a single
-// package of one or more already-parsed files.  Its dependencies are
-// loaded from compiler export data.  This is what you'd typically use
-// for a compiler; it does not depend on golang.org/x/tools/go/loader.
+// package of one or more already-parsed files. Its dependencies are
+// loaded from compiler export data. This is what you'd typically use
+// for a compiler; it does not depend on the obsolete
+// [golang.org/x/tools/go/loader].
 //
 // It shows the printed representation of packages, functions, and
 // instructions.  Within the function listing, the name of each
@@ -47,8 +53,12 @@ func main() {
 //
 // Build and run the ssadump.go program if you want a standalone tool
 // with similar functionality. It is located at
-// golang.org/x/tools/cmd/ssadump.
+// [golang.org/x/tools/cmd/ssadump].
 //
+// Use ssautil.BuildPackage only if you have parsed--but not
+// type-checked--syntax trees. Typically, clients already have typed
+// syntax, perhaps obtained from golang.org/x/tools/go/packages.
+// In that case, see the other examples for simpler approaches.
 func Example_buildPackage() {
 	// Parse the source files.
 	fset := token.NewFileSet()
@@ -105,17 +115,17 @@ func Example_buildPackage() {
 	// # Location: hello.go:8:6
 	// func main():
 	// 0:                                                                entry P:0 S:0
-	// 	t0 = new [1]interface{} (varargs)                       *[1]interface{}
-	// 	t1 = &t0[0:int]                                            *interface{}
-	// 	t2 = make interface{} <- string ("Hello, World!":string)    interface{}
+	// 	t0 = new [1]any (varargs)                                       *[1]any
+	// 	t1 = &t0[0:int]                                                    *any
+	// 	t2 = make any <- string ("Hello, World!":string)                    any
 	// 	*t1 = t2
-	// 	t3 = slice t0[:]                                          []interface{}
+	// 	t3 = slice t0[:]                                                  []any
 	// 	t4 = fmt.Println(t3...)                              (n int, err error)
 	// 	return
 }
 
 // This example builds SSA code for a set of packages using the
-// x/tools/go/packages API. This is what you would typically use for a
+// [golang.org/x/tools/go/packages] API. This is what you would typically use for a
 // analysis capable of operating on a single package.
 func Example_loadPackages() {
 	// Load, parse, and type-check the initial packages.
@@ -145,7 +155,7 @@ func Example_loadPackages() {
 }
 
 // This example builds SSA code for a set of packages plus all their dependencies,
-// using the x/tools/go/packages API.
+// using the [golang.org/x/tools/go/packages] API.
 // This is what you'd typically use for a whole-program analysis.
 func Example_loadWholeProgram() {
 	// Load, parse, and type-check the whole program.
@@ -156,7 +166,7 @@ func Example_loadWholeProgram() {
 	}
 
 	// Create SSA packages for well-typed packages and their dependencies.
-	prog, pkgs := ssautil.AllPackages(initial, ssa.PrintPackages)
+	prog, pkgs := ssautil.AllPackages(initial, ssa.PrintPackages|ssa.InstantiateGenerics)
 	_ = pkgs
 
 	// Build SSA code for the whole program.

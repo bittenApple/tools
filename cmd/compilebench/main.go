@@ -60,21 +60,20 @@
 // today they write only the profile for the last benchmark executed.
 //
 // The default memory profiling rate is one profile sample per 512 kB
-// allocated (see ``go doc runtime.MemProfileRate'').
+// allocated (see “go doc runtime.MemProfileRate”).
 // Lowering the rate (for example, -memprofilerate 64000) produces
 // a more fine-grained and therefore accurate profile, but it also incurs
 // execution cost. For benchmark comparisons, never use timings
 // obtained with a low -memprofilerate option.
 //
-// Example
+// # Example
 //
 // Assuming the base version of the compiler has been saved with
-// ``toolstash save,'' this sequence compares the old and new compiler:
+// “toolstash save,” this sequence compares the old and new compiler:
 //
 //	compilebench -count 10 -compile $(toolstash -n compile) >old.txt
 //	compilebench -count 10 >new.txt
 //	benchstat old.txt new.txt
-//
 package main
 
 import (
@@ -82,23 +81,25 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	exec "golang.org/x/sys/execabs"
-	"io/ioutil"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
 var (
-	goroot   string
-	compiler string
-	linker   string
-	runRE    *regexp.Regexp
-	is6g     bool
+	goroot                   string
+	compiler                 string
+	assembler                string
+	linker                   string
+	runRE                    *regexp.Regexp
+	is6g                     bool
+	needCompilingRuntimeFlag bool
 )
 
 var (
@@ -106,6 +107,7 @@ var (
 	flagAlloc          = flag.Bool("alloc", false, "report allocations")
 	flagObj            = flag.Bool("obj", false, "report object file stats")
 	flagCompiler       = flag.String("compile", "", "use `exe` as the cmd/compile binary")
+	flagAssembler      = flag.String("asm", "", "use `exe` as the cmd/asm binary")
 	flagCompilerFlags  = flag.String("compileflags", "", "additional `flags` to pass to compile")
 	flagLinker         = flag.String("link", "", "use `exe` as the cmd/link binary")
 	flagLinkerFlags    = flag.String("linkflags", "", "additional `flags` to pass to link")
@@ -116,6 +118,7 @@ var (
 	flagMemprofilerate = flag.Int64("memprofilerate", -1, "set memory profile `rate`")
 	flagPackage        = flag.String("pkg", "", "if set, benchmark the package at path `pkg`")
 	flagShort          = flag.Bool("short", false, "skip long-running benchmarks")
+	flagTrace          = flag.Bool("trace", false, "debug tracing of builds")
 )
 
 type test struct {
@@ -178,6 +181,13 @@ func main() {
 			is6g = true
 		}
 	}
+	assembler = *flagAssembler
+	if assembler == "" {
+		_, assembler = toolPath("asm")
+	}
+	if err := checkCompilingRuntimeFlag(assembler); err != nil {
+		log.Fatalf("checkCompilingRuntimeFlag: %v", err)
+	}
 
 	linker = *flagLinker
 	if linker == "" && !is6g { // TODO: Support 6l
@@ -238,8 +248,10 @@ func toolPath(names ...string) (found, path string) {
 }
 
 type Pkg struct {
-	Dir     string
-	GoFiles []string
+	ImportPath string
+	Dir        string
+	GoFiles    []string
+	SFiles     []string
 }
 
 func goList(dir string) (*Pkg, error) {
@@ -325,10 +337,10 @@ type compile struct{ dir string }
 func (compile) long() bool { return false }
 
 func (c compile) run(name string, count int) error {
-	// Make sure dependencies needed by go tool compile are installed to GOROOT/pkg.
-	out, err := exec.Command(*flagGoCmd, "build", "-i", c.dir).CombinedOutput()
+	// Make sure dependencies needed by go tool compile are built.
+	out, err := exec.Command(*flagGoCmd, "build", c.dir).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("go build -i %s: %v\n%s", c.dir, err, out)
+		return fmt.Errorf("go build %s: %v\n%s", c.dir, err, out)
 	}
 
 	// Find dir and source file list.
@@ -337,8 +349,39 @@ func (c compile) run(name string, count int) error {
 		return err
 	}
 
-	args := []string{"-o", "_compilebench_.o"}
+	importcfg, err := genImportcfgFile(c.dir, "", false) // TODO: pass compiler flags?
+	if err != nil {
+		return err
+	}
+
+	// If this package has assembly files, we'll need to pass a symabis
+	// file to the compiler; call a helper to invoke the assembler
+	// to do that.
+	var symAbisFile string
+	var asmIncFile string
+	if len(pkg.SFiles) != 0 {
+		symAbisFile = filepath.Join(pkg.Dir, "symabis")
+		asmIncFile = filepath.Join(pkg.Dir, "go_asm.h")
+		content := "\n"
+		if err := os.WriteFile(asmIncFile, []byte(content), 0666); err != nil {
+			return fmt.Errorf("os.WriteFile(%s) failed: %v", asmIncFile, err)
+		}
+		defer os.Remove(symAbisFile)
+		defer os.Remove(asmIncFile)
+		if err := genSymAbisFile(pkg, symAbisFile, pkg.Dir); err != nil {
+			return err
+		}
+	}
+
+	args := []string{"-o", "_compilebench_.o", "-p", pkg.ImportPath}
 	args = append(args, strings.Fields(*flagCompilerFlags)...)
+	if symAbisFile != "" {
+		args = append(args, "-symabis", symAbisFile)
+	}
+	if importcfg != "" {
+		args = append(args, "-importcfg", importcfg)
+		defer os.Remove(importcfg)
+	}
 	args = append(args, pkg.GoFiles...)
 	if err := runBuildCmd(name, count, pkg.Dir, compiler, args); err != nil {
 		return err
@@ -347,7 +390,7 @@ func (c compile) run(name string, count int) error {
 	opath := pkg.Dir + "/_compilebench_.o"
 	if *flagObj {
 		// TODO(josharian): object files are big; just read enough to find what we seek.
-		data, err := ioutil.ReadFile(opath)
+		data, err := os.ReadFile(opath)
 		if err != nil {
 			log.Print(err)
 		}
@@ -374,18 +417,35 @@ func (r link) run(name string, count int) error {
 	}
 
 	// Build dependencies.
-	out, err := exec.Command(*flagGoCmd, "build", "-i", "-o", "/dev/null", r.dir).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("go build -i %s: %v\n%s", r.dir, err, out)
+	ldflags := *flagLinkerFlags
+	if r.flags != "" {
+		if ldflags != "" {
+			ldflags += " "
+		}
+		ldflags += r.flags
 	}
+	out, err := exec.Command(*flagGoCmd, "build", "-o", "/dev/null", "-ldflags="+ldflags, r.dir).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("go build -a %s: %v\n%s", r.dir, err, out)
+	}
+
+	importcfg, err := genImportcfgFile(r.dir, "-ldflags="+ldflags, true)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(importcfg)
 
 	// Build the main package.
 	pkg, err := goList(r.dir)
 	if err != nil {
 		return err
 	}
-	args := []string{"-o", "_compilebench_.o"}
+	args := []string{"-o", "_compilebench_.o", "-importcfg", importcfg}
 	args = append(args, pkg.GoFiles...)
+	if *flagTrace {
+		fmt.Fprintf(os.Stderr, "running: %s %+v\n",
+			compiler, args)
+	}
 	cmd := exec.Command(compiler, args...)
 	cmd.Dir = pkg.Dir
 	cmd.Stdout = os.Stderr
@@ -397,7 +457,7 @@ func (r link) run(name string, count int) error {
 	defer os.Remove(pkg.Dir + "/_compilebench_.o")
 
 	// Link the main package.
-	args = []string{"-o", "_compilebench_.exe"}
+	args = []string{"-o", "_compilebench_.exe", "-importcfg", importcfg}
 	args = append(args, strings.Fields(*flagLinkerFlags)...)
 	args = append(args, strings.Fields(r.flags)...)
 	args = append(args, "_compilebench_.o")
@@ -429,6 +489,10 @@ func runBuildCmd(name string, count int, dir, tool string, args []string) error 
 			preArgs = append(preArgs, "-cpuprofile", "_compilebench_.cpuprof")
 		}
 	}
+	if *flagTrace {
+		fmt.Fprintf(os.Stderr, "running: %s %+v\n",
+			tool, append(preArgs, args...))
+	}
 	cmd := exec.Command(tool, append(preArgs, args...)...)
 	cmd.Dir = dir
 	cmd.Stdout = os.Stderr
@@ -443,7 +507,7 @@ func runBuildCmd(name string, count int, dir, tool string, args []string) error 
 	haveAllocs, haveRSS := false, false
 	var allocs, allocbytes, rssbytes int64
 	if *flagAlloc || *flagMemprofile != "" {
-		out, err := ioutil.ReadFile(dir + "/_compilebench_.memprof")
+		out, err := os.ReadFile(dir + "/_compilebench_.memprof")
 		if err != nil {
 			log.Print("cannot find memory profile after compilation")
 		}
@@ -476,7 +540,7 @@ func runBuildCmd(name string, count int, dir, tool string, args []string) error 
 			if *flagCount != 1 {
 				outpath = fmt.Sprintf("%s_%d", outpath, count)
 			}
-			if err := ioutil.WriteFile(outpath, out, 0666); err != nil {
+			if err := os.WriteFile(outpath, out, 0666); err != nil {
 				log.Print(err)
 			}
 		}
@@ -484,7 +548,7 @@ func runBuildCmd(name string, count int, dir, tool string, args []string) error 
 	}
 
 	if *flagCpuprofile != "" {
-		out, err := ioutil.ReadFile(dir + "/_compilebench_.cpuprof")
+		out, err := os.ReadFile(dir + "/_compilebench_.cpuprof")
 		if err != nil {
 			log.Print(err)
 		}
@@ -492,7 +556,7 @@ func runBuildCmd(name string, count int, dir, tool string, args []string) error 
 		if *flagCount != 1 {
 			outpath = fmt.Sprintf("%s_%d", outpath, count)
 		}
-		if err := ioutil.WriteFile(outpath, out, 0666); err != nil {
+		if err := os.WriteFile(outpath, out, 0666); err != nil {
 			log.Print(err)
 		}
 		os.Remove(dir + "/_compilebench_.cpuprof")
@@ -510,4 +574,124 @@ func runBuildCmd(name string, count int, dir, tool string, args []string) error 
 	}
 
 	return nil
+}
+
+func checkCompilingRuntimeFlag(assembler string) error {
+	td, err := os.MkdirTemp("", "asmsrcd")
+	if err != nil {
+		return fmt.Errorf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(td)
+	src := filepath.Join(td, "asm.s")
+	obj := filepath.Join(td, "asm.o")
+	const code = `
+TEXT ·foo(SB),$0-0
+RET
+`
+	if err := os.WriteFile(src, []byte(code), 0644); err != nil {
+		return fmt.Errorf("writing %s failed: %v", src, err)
+	}
+
+	// Try compiling the assembly source file passing
+	// -compiling-runtime; if it succeeds, then we'll need it
+	// when doing assembly of the reflect package later on.
+	// If it does not succeed, the assumption is that it's not
+	// needed.
+	args := []string{"-o", obj, "-p", "reflect", "-compiling-runtime", src}
+	cmd := exec.Command(assembler, args...)
+	cmd.Dir = td
+	out, aerr := cmd.CombinedOutput()
+	if aerr != nil {
+		if strings.Contains(string(out), "flag provided but not defined: -compiling-runtime") {
+			// flag not defined: assume we're using a recent assembler, so
+			// don't use -compiling-runtime.
+			return nil
+		}
+		// error is not flag-related; report it.
+		return fmt.Errorf("problems invoking assembler with args %+v: error %v\n%s\n", args, aerr, out)
+	}
+	// asm invocation succeeded -- assume we need the flag.
+	needCompilingRuntimeFlag = true
+	return nil
+}
+
+// genSymAbisFile runs the assembler on the target package asm files
+// with "-gensymabis" to produce a symabis file that will feed into
+// the Go source compilation. This is fairly hacky in that if the
+// asm invocation convention changes it will need to be updated
+// (hopefully that will not be needed too frequently).
+func genSymAbisFile(pkg *Pkg, symAbisFile, incdir string) error {
+	args := []string{"-gensymabis", "-o", symAbisFile,
+		"-p", pkg.ImportPath,
+		"-I", filepath.Join(goroot, "pkg", "include"),
+		"-I", incdir,
+		"-D", "GOOS_" + runtime.GOOS,
+		"-D", "GOARCH_" + runtime.GOARCH}
+	if pkg.ImportPath == "reflect" && needCompilingRuntimeFlag {
+		args = append(args, "-compiling-runtime")
+	}
+	args = append(args, pkg.SFiles...)
+	if *flagTrace {
+		fmt.Fprintf(os.Stderr, "running: %s %+v\n",
+			assembler, args)
+	}
+	cmd := exec.Command(assembler, args...)
+	cmd.Dir = pkg.Dir
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("assembling to produce symabis file: %v", err)
+	}
+	return nil
+}
+
+// genImportcfgFile generates an importcfg file for building package
+// dir. Returns the generated importcfg file path (or empty string
+// if the package has no dependency).
+func genImportcfgFile(dir string, flags string, full bool) (string, error) {
+	need := "{{.Imports}}"
+	if full {
+		// for linking, we need transitive dependencies
+		need = "{{.Deps}}"
+	}
+
+	if flags == "" {
+		flags = "--" // passing "" to go list, it will match to the current directory
+	}
+
+	// find imported/dependent packages
+	cmd := exec.Command(*flagGoCmd, "list", "-f", need, flags, dir)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("go list -f %s %s: %v", need, dir, err)
+	}
+	// trim [ ]\n
+	if len(out) < 3 || out[0] != '[' || out[len(out)-2] != ']' || out[len(out)-1] != '\n' {
+		return "", fmt.Errorf("unexpected output from go list -f %s %s: %s", need, dir, out)
+	}
+	out = out[1 : len(out)-2]
+	if len(out) == 0 {
+		return "", nil
+	}
+
+	// build importcfg for imported packages
+	cmd = exec.Command(*flagGoCmd, "list", "-export", "-f", "{{if .Export}}packagefile {{.ImportPath}}={{.Export}}{{end}}", flags)
+	cmd.Args = append(cmd.Args, strings.Fields(string(out))...)
+	cmd.Stderr = os.Stderr
+	out, err = cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("generating importcfg for %s: %s: %v", dir, cmd, err)
+	}
+
+	f, err := os.CreateTemp("", "importcfg")
+	if err != nil {
+		return "", fmt.Errorf("creating tmp importcfg file failed: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(out); err != nil {
+		return "", fmt.Errorf("writing importcfg file %s failed: %v", f.Name(), err)
+	}
+	return f.Name(), nil
 }

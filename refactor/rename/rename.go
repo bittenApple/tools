@@ -2,10 +2,13 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package rename contains the implementation of the 'gorename' command
-// whose main function is in golang.org/x/tools/cmd/gorename.
-// See the Usage constant for the command documentation.
-package rename // import "golang.org/x/tools/refactor/rename"
+// Package rename contains the obsolete implementation of the deleted
+// golang.org/x/tools/cmd/gorename. This logic has not worked properly
+// since the advent of Go modules, and should be deleted too.
+//
+// Use gopls instead, either via the Rename LSP method or the "gopls
+// rename" subcommand.
+package rename
 
 import (
 	"bytes"
@@ -17,11 +20,10 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	exec "golang.org/x/sys/execabs"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
+	"os/exec"
 	"path"
 	"regexp"
 	"sort"
@@ -324,7 +326,7 @@ func Main(ctxt *build.Context, offsetFlag, fromFlag, to string) error {
 	for _, obj := range fromObjects {
 		if obj, ok := obj.(*types.Func); ok {
 			recv := obj.Type().(*types.Signature).Recv()
-			if recv != nil && isInterface(recv.Type().Underlying()) {
+			if recv != nil && types.IsInterface(recv.Type()) {
 				r.changeMethods = true
 				break
 			}
@@ -579,17 +581,17 @@ func plural(n int) string {
 var writeFile = reallyWriteFile
 
 func reallyWriteFile(filename string, content []byte) error {
-	return ioutil.WriteFile(filename, content, 0644)
+	return os.WriteFile(filename, content, 0644)
 }
 
 func diff(filename string, content []byte) error {
 	renamed := fmt.Sprintf("%s.%d.renamed", filename, os.Getpid())
-	if err := ioutil.WriteFile(renamed, content, 0644); err != nil {
+	if err := os.WriteFile(renamed, content, 0644); err != nil {
 		return err
 	}
 	defer os.Remove(renamed)
 
-	diff, err := exec.Command(DiffCmd, "-u", filename, renamed).CombinedOutput()
+	diff, err := exec.Command(DiffCmd, "-u", filename, renamed).Output()
 	if len(diff) > 0 {
 		// diff exits with a non-zero status when the files don't match.
 		// Ignore that failure as long as we get output.
@@ -597,6 +599,9 @@ func diff(filename string, content []byte) error {
 		return nil
 	}
 	if err != nil {
+		if exit, ok := err.(*exec.ExitError); ok && len(exit.Stderr) > 0 {
+			err = fmt.Errorf("%w\nstderr:\n%s", err, exit.Stderr)
+		}
 		return fmt.Errorf("computing diff: %v", err)
 	}
 	return nil

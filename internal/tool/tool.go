@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
+	"strings"
 	"time"
 )
 
@@ -28,8 +29,9 @@ import (
 //       (&Application{}).Main("myapp", "non-flag-command-line-arg-help", os.Args[1:])
 //     }
 // It recursively scans the application object for fields with a tag containing
-//     `flag:"flagname" help:"short help text"``
-// uses all those fields to build command line flags.
+//     `flag:"flagnames" help:"short help text"`
+// uses all those fields to build command line flags. It will split flagnames on
+// commas and add a flag per name.
 // It expects the Application type to have a method
 //     Run(context.Context, args...string) error
 // which it invokes only after all command line flag processing has been finished.
@@ -41,7 +43,9 @@ import (
 type Profile struct {
 	CPU    string `flag:"profile.cpu" help:"write CPU profile to this file"`
 	Memory string `flag:"profile.mem" help:"write memory profile to this file"`
+	Alloc  string `flag:"profile.alloc" help:"write alloc profile to this file"`
 	Trace  string `flag:"profile.trace" help:"write trace log to this file"`
+	Block  string `flag:"profile.block" help:"write block profile to this file"`
 }
 
 // Application is the interface that must be satisfied by an object passed to Main.
@@ -64,6 +68,10 @@ type Application interface {
 	Run(ctx context.Context, args ...string) error
 }
 
+type SubCommand interface {
+	Parent() string
+}
+
 // This is the type returned by CommandLineErrorf, which causes the outer main
 // to trigger printing of the command line help.
 type commandLineError string
@@ -83,15 +91,13 @@ func CommandLineErrorf(message string, args ...interface{}) error {
 // application exits with an exit code of 2.
 func Main(ctx context.Context, app Application, args []string) {
 	s := flag.NewFlagSet(app.Name(), flag.ExitOnError)
-	s.Usage = func() {
-		fmt.Fprint(s.Output(), app.ShortHelp())
-		fmt.Fprintf(s.Output(), "\n\nUsage: %v [flags] %v\n", app.Name(), app.Usage())
-		app.DetailedHelp(s)
-	}
-	addFlags(s, reflect.StructField{}, reflect.ValueOf(app))
-	if err := Run(ctx, app, args); err != nil {
+	if err := Run(ctx, s, app, args); err != nil {
 		fmt.Fprintf(s.Output(), "%s: %v\n", app.Name(), err)
 		if _, printHelp := err.(commandLineError); printHelp {
+			// TODO(adonovan): refine this. It causes
+			// any command-line error to result in the full
+			// usage message, which typically obscures
+			// the actual error.
 			s.Usage()
 		}
 		os.Exit(2)
@@ -101,15 +107,26 @@ func Main(ctx context.Context, app Application, args []string) {
 // Run is the inner loop for Main; invoked by Main, recursively by
 // Run, and by various tests.  It runs the application and returns an
 // error.
-func Run(ctx context.Context, app Application, args []string) error {
-	s := flag.NewFlagSet(app.Name(), flag.ExitOnError)
+func Run(ctx context.Context, s *flag.FlagSet, app Application, args []string) (resultErr error) {
 	s.Usage = func() {
-		fmt.Fprint(s.Output(), app.ShortHelp())
-		fmt.Fprintf(s.Output(), "\n\nUsage: %v [flags] %v\n", app.Name(), app.Usage())
+		if app.ShortHelp() != "" {
+			fmt.Fprintf(s.Output(), "%s\n\nUsage:\n  ", app.ShortHelp())
+			if sub, ok := app.(SubCommand); ok && sub.Parent() != "" {
+				fmt.Fprintf(s.Output(), "%s [flags] %s", sub.Parent(), app.Name())
+			} else {
+				fmt.Fprintf(s.Output(), "%s [flags]", app.Name())
+			}
+			if usage := app.Usage(); usage != "" {
+				fmt.Fprintf(s.Output(), " %s", usage)
+			}
+			fmt.Fprint(s.Output(), "\n")
+		}
 		app.DetailedHelp(s)
 	}
 	p := addFlags(s, reflect.StructField{}, reflect.ValueOf(app))
-	s.Parse(args)
+	if err := s.Parse(args); err != nil {
+		return err
+	}
 
 	if p != nil && p.CPU != "" {
 		f, err := os.Create(p.CPU)
@@ -117,9 +134,15 @@ func Run(ctx context.Context, app Application, args []string) error {
 			return err
 		}
 		if err := pprof.StartCPUProfile(f); err != nil {
+			f.Close() // ignore error
 			return err
 		}
-		defer pprof.StopCPUProfile()
+		defer func() {
+			pprof.StopCPUProfile()
+			if closeErr := f.Close(); resultErr == nil {
+				resultErr = closeErr
+			}
+		}()
 	}
 
 	if p != nil && p.Trace != "" {
@@ -128,10 +151,14 @@ func Run(ctx context.Context, app Application, args []string) error {
 			return err
 		}
 		if err := trace.Start(f); err != nil {
+			f.Close() // ignore error
 			return err
 		}
 		defer func() {
 			trace.Stop()
+			if closeErr := f.Close(); resultErr == nil {
+				resultErr = closeErr
+			}
 			log.Printf("To view the trace, run:\n$ go tool trace view %s", p.Trace)
 		}()
 	}
@@ -146,7 +173,40 @@ func Run(ctx context.Context, app Application, args []string) error {
 			if err := pprof.WriteHeapProfile(f); err != nil {
 				log.Printf("Writing memory profile: %v", err)
 			}
-			f.Close()
+			if err := f.Close(); err != nil {
+				log.Printf("Closing memory profile: %v", err)
+			}
+		}()
+	}
+
+	if p != nil && p.Alloc != "" {
+		f, err := os.Create(p.Alloc)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := pprof.Lookup("allocs").WriteTo(f, 0); err != nil {
+				log.Printf("Writing alloc profile: %v", err)
+			}
+			if err := f.Close(); err != nil {
+				log.Printf("Closing alloc profile: %v", err)
+			}
+		}()
+	}
+
+	if p != nil && p.Block != "" {
+		f, err := os.Create(p.Block)
+		if err != nil {
+			return err
+		}
+		runtime.SetBlockProfileRate(1) // record all blocking events
+		defer func() {
+			if err := pprof.Lookup("block").WriteTo(f, 0); err != nil {
+				log.Printf("Writing block profile: %v", err)
+			}
+			if err := f.Close(); err != nil {
+				log.Printf("Closing block profile: %v", err)
+			}
 		}()
 	}
 
@@ -161,30 +221,47 @@ func addFlags(f *flag.FlagSet, field reflect.StructField, value reflect.Value) *
 		return nil
 	}
 	// now see if is actually a flag
-	flagName, isFlag := field.Tag.Lookup("flag")
+	flagNames, isFlag := field.Tag.Lookup("flag")
 	help := field.Tag.Get("help")
-	if !isFlag {
-		// not a flag, but it might be a struct with flags in it
-		if value.Elem().Kind() != reflect.Struct {
-			return nil
-		}
-		p, _ := value.Interface().(*Profile)
-		// go through all the fields of the struct
-		sv := value.Elem()
-		for i := 0; i < sv.Type().NumField(); i++ {
-			child := sv.Type().Field(i)
-			v := sv.Field(i)
-			// make sure we have a pointer
-			if v.Kind() != reflect.Ptr {
-				v = v.Addr()
-			}
-			// check if that field is a flag or contains flags
-			if fp := addFlags(f, child, v); fp != nil {
-				p = fp
+	if isFlag {
+		nameList := strings.Split(flagNames, ",")
+		// add the main flag
+		addFlag(f, value, nameList[0], help)
+		if len(nameList) > 1 {
+			// and now add any aliases using the same flag value
+			fv := f.Lookup(nameList[0]).Value
+			for _, flagName := range nameList[1:] {
+				f.Var(fv, flagName, help)
 			}
 		}
-		return p
+		return nil
 	}
+	// not a flag, but it might be a struct with flags in it
+	value = resolve(value.Elem())
+	if value.Kind() != reflect.Struct {
+		return nil
+	}
+
+	// TODO(adonovan): there's no need for this special treatment of Profile:
+	// The caller can use f.Lookup("profile.cpu") etc instead.
+	p, _ := value.Addr().Interface().(*Profile)
+	// go through all the fields of the struct
+	for i := 0; i < value.Type().NumField(); i++ {
+		child := value.Type().Field(i)
+		v := value.Field(i)
+		// make sure we have a pointer
+		if v.Kind() != reflect.Ptr {
+			v = v.Addr()
+		}
+		// check if that field is a flag or contains flags
+		if fp := addFlags(f, child, v); fp != nil {
+			p = fp
+		}
+	}
+	return p
+}
+
+func addFlag(f *flag.FlagSet, value reflect.Value, flagName string, help string) {
 	switch v := value.Interface().(type) {
 	case flag.Value:
 		f.Var(v, flagName, help)
@@ -205,7 +282,17 @@ func addFlags(f *flag.FlagSet, field reflect.StructField, value reflect.Value) *
 	case *uint64:
 		f.Uint64Var(v, flagName, *v, help)
 	default:
-		log.Fatalf("Cannot understand flag of type %T", v)
+		log.Fatalf("field %q of type %T is not assignable to flag.Value", flagName, v)
 	}
-	return nil
+}
+
+func resolve(v reflect.Value) reflect.Value {
+	for {
+		switch v.Kind() {
+		case reflect.Interface, reflect.Ptr:
+			v = v.Elem()
+		default:
+			return v
+		}
+	}
 }

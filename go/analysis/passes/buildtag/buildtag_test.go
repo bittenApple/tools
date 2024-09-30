@@ -5,19 +5,15 @@
 package buildtag_test
 
 import (
-	"runtime"
-	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/analysistest"
 	"golang.org/x/tools/go/analysis/passes/buildtag"
+	"golang.org/x/tools/internal/versions"
 )
 
 func Test(t *testing.T) {
-	if strings.HasPrefix(runtime.Version(), "go1.") && runtime.Version() < "go1.16" {
-		t.Skipf("skipping on %v", runtime.Version())
-	}
 	analyzer := *buildtag.Analyzer
 	analyzer.Run = func(pass *analysis.Pass) (interface{}, error) {
 		defer func() {
@@ -35,5 +31,9 @@ func Test(t *testing.T) {
 
 		return buildtag.Analyzer.Run(pass)
 	}
-	analysistest.Run(t, analysistest.TestData(), &analyzer, "a")
+	patterns := []string{"a"}
+	if versions.ConstraintGoVersion != nil {
+		patterns = append(patterns, "b")
+	}
+	analysistest.Run(t, analysistest.TestData(), &analyzer, patterns...)
 }

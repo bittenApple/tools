@@ -13,10 +13,10 @@ import (
 
 func Test(t *testing.T) {
 	testdata := analysistest.TestData()
-
 	analysistest.Run(t, testdata, tests.Analyzer,
 		"a",        // loads "a", "a [a.test]", and "a.test"
 		"b_x_test", // loads "b" and "b_x_test"
 		"divergent",
+		"typeparams",
 	)
 }

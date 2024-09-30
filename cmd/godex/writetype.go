@@ -12,7 +12,9 @@
 
 package main
 
-import "go/types"
+import (
+	"go/types"
+)
 
 func (p *printer) writeType(this *types.Package, typ types.Type) {
 	p.writeTypeInternal(this, typ, make([]types.Type, 8))
@@ -172,6 +174,10 @@ func (p *printer) writeTypeInternal(this *types.Package, typ types.Type, visited
 		if parens {
 			p.print(")")
 		}
+
+	case *types.Alias:
+		// TODO(adonovan): display something aliasy.
+		p.writeTypeInternal(this, types.Unalias(t), visited)
 
 	case *types.Named:
 		s := "<Named w/o object>"

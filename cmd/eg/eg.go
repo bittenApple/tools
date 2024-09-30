@@ -15,12 +15,11 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
-	exec "golang.org/x/sys/execabs"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/refactor/eg"
 )
@@ -59,7 +58,8 @@ func doMain() error {
 	args := flag.Args()
 
 	if *helpFlag {
-		fmt.Fprint(os.Stderr, eg.Help)
+		help := eg.Help // hide %s from vet
+		fmt.Fprint(os.Stderr, help)
 		os.Exit(2)
 	}
 
@@ -76,7 +76,7 @@ func doMain() error {
 	if err != nil {
 		return err
 	}
-	template, err := ioutil.ReadFile(tAbs)
+	template, err := os.ReadFile(tAbs)
 	if err != nil {
 		return err
 	}
